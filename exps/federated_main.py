@@ -85,7 +85,7 @@ def Fedavg(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         # test
         acc_list_l, loss_list_l= test_inference_fedavg(args,round, local_model_list, test_dataset, user_groups_lt,logger,summary_writer)
         print('| ROUND: {} | For all users, mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round,np.mean(acc_list_l),np.std(acc_list_l)))
-        logger.info('| ROUND: {} | For all users, mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round,np.mean(acc_list_l),np.std(acc_list_l)))
+        logger.info('| ROUND: {} | Test Acc: {:.5f}±{:.5f}, Test Loss: {:.5f}'.format(round, np.mean(acc_list_l), np.std(acc_list_l), np.mean(loss_list_l)))
         summary_writer.add_scalar('scalar/Total_Test_Avg_Accuracy', np.mean(acc_list_l), round)
 
         if np.mean(acc_list_l) > best_acc:
@@ -95,10 +95,8 @@ def Fedavg(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
             net = copy.deepcopy(local_model_list[0])
             torch.save(net.state_dict(), logdir + '/localmodel0.pth')
 
-    print('best results:')
-    print('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round,best_acc,best_std))
-    logger.info('best results:')
-    logger.info('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round,best_acc,best_std))
+    print('| BEST ROUND: {} | Test Acc: {:.5f}±{:.5f}'.format(best_round, best_acc, best_std))
+    logger.info('| BEST ROUND: {} | Test Acc: {:.5f}±{:.5f}'.format(best_round, best_acc, best_std))
 
 
 def Fedprox(args, train_dataset, test_dataset, user_groups, user_groups_lt, local_model_list, classes_list,logdir):
@@ -138,10 +136,9 @@ def Fedprox(args, train_dataset, test_dataset, user_groups, user_groups_lt, loca
         # test
         acc_list_l, loss_list_l = test_inference_fedavg(args, round, local_model_list, test_dataset,user_groups_lt, logger, summary_writer)
         print('| ROUND: {} | For all users, mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round,np.mean(acc_list_l),np.std(acc_list_l)))
-        logger.info('| ROUND: {} | For all users, mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round,np.mean(acc_list_l),np.std(acc_list_l)))
+        logger.info('| ROUND: {} | Train Acc: {:.5f}, Test Acc: {:.5f}±{:.5f}, Train Loss: {:.5f}, Test Loss: {:.5f}'.format(
+            round, np.mean(acc_list_train), np.mean(acc_list_l), np.std(acc_list_l), np.mean(loss_list_train), np.mean(loss_list_l)))
         summary_writer.add_scalars('scalar/Total_Avg_Accuracy', {'train':np.mean(acc_list_train),'test':np.mean(acc_list_l)}, round)
-
-        logger.info('| ROUND: {} | For all users, mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round,np.mean(acc_list_l),np.std(acc_list_l)))
         summary_writer.add_scalars('scalar/Total_Avg_Loss',{'train': np.mean(loss_list_train), 'test': np.mean(loss_list_l)}, round)
 
         if np.mean(acc_list_l) > best_acc:
@@ -150,11 +147,6 @@ def Fedprox(args, train_dataset, test_dataset, user_groups, user_groups_lt, loca
             best_round = round
             net = copy.deepcopy(local_model_list[0])
             torch.save(net.state_dict(), logdir + '/localmodel0.pth')
-
-        print('best results:')
-        print('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round, best_acc, best_std))
-        logger.info('best results:')
-        logger.info('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round, best_acc, best_std))
 
 def Moon(args, train_dataset, test_dataset, user_groups, user_groups_lt, local_model_list, classes_list,global_model,logger,summary_writer,logdir):
 
@@ -235,7 +227,7 @@ def Moon(args, train_dataset, test_dataset, user_groups, user_groups_lt, local_m
         acc_list_l, loss_list_l,acc_list_g, loss_list,loss_total_list = test_inference_new_het_lt(args, local_model_list, test_dataset,classes_list, user_groups_lt)
 
         print('| ROUND: {} | For all users (w/o protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean(acc_list_l), np.std(acc_list_l)))
-        logger.info('| ROUND: {} | For all users (w/o protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean(acc_list_l), np.std(acc_list_l)))
+        logger.info('| ROUND: {} | Test Acc (w/o protos): {:.5f}±{:.5f}'.format(round, np.mean(acc_list_l), np.std(acc_list_l)))
         summary_writer.add_scalar('scalar/Total_Test_Avg_Accuracy', np.mean(acc_list_l), round)
 
         if np.mean(acc_list_l) > best_acc:
@@ -243,10 +235,8 @@ def Moon(args, train_dataset, test_dataset, user_groups, user_groups_lt, local_m
             best_std = np.std(acc_list_l)
             best_round = round
 
-    print('best results:')
-    print('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round, best_acc, best_std))
-    logger.info('best results:')
-    logger.info('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round, best_acc, best_std))
+    print('| BEST ROUND: {} | Test Acc: {:.5f}±{:.5f}'.format(best_round, best_acc, best_std))
+    logger.info('| BEST ROUND: {} | Test Acc: {:.5f}±{:.5f}'.format(best_round, best_acc, best_std))
 
 def fedntd(args, train_dataset, test_dataset, user_groups, user_groups_lt, local_model_list, classes_list, summary_writer,logger,logdir):
 
@@ -279,7 +269,7 @@ def fedntd(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         # test
         acc_list_l, loss_list_l= test_inference_fedavg(args,round, local_model_list, test_dataset, user_groups_lt,logger,summary_writer)
         print('| ROUND: {} | For all users, mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round,np.mean(acc_list_l),np.std(acc_list_l)))
-        logger.info('| ROUND: {} | For all users, mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round,np.mean(acc_list_l),np.std(acc_list_l)))
+        logger.info('| ROUND: {} | Test Acc: {:.5f}±{:.5f}'.format(round, np.mean(acc_list_l), np.std(acc_list_l)))
         summary_writer.add_scalar('scalar/Total_Test_Avg_Accuracy', np.mean(acc_list_l), round)
 
         if np.mean(acc_list_l) > best_acc:
@@ -287,10 +277,8 @@ def fedntd(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
             best_std = np.std(acc_list_l)
             best_round = round
 
-    print('best results:')
-    print('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round,best_acc,best_std))
-    logger.info('best results:')
-    logger.info('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round,best_acc,best_std))
+    print('| BEST ROUND: {} | Test Acc: {:.5f}±{:.5f}'.format(best_round, best_acc, best_std))
+    logger.info('| BEST ROUND: {} | Test Acc: {:.5f}±{:.5f}'.format(best_round, best_acc, best_std))
 
 def fedgkd(args, train_dataset, test_dataset, user_groups, user_groups_lt, local_model_list, classes_list, logdir):
     idxs_users = np.arange(args.num_users)
@@ -347,21 +335,15 @@ def fedgkd(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         # test
         acc_list_l, loss_list_l = test_inference_fedavg(args, round, local_model_list, test_dataset, user_groups_lt, logger, summary_writer)
         print('| ROUND: {} | For all users, mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean( acc_list_l), np.std( acc_list_l)))
-        logger.info('| ROUND: {} | For all users, mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean( acc_list_l), np.std( acc_list_l)))
+        logger.info('| ROUND: {} | Train Acc: {:.5f}, Test Acc: {:.5f}±{:.5f}, Train Loss: {:.5f}, Test Loss: {:.5f}'.format(
+            round, np.mean(acc_list_train), np.mean(acc_list_l), np.std(acc_list_l), np.mean(loss_list_train), np.mean(loss_list_l)))
         summary_writer.add_scalars('scalar/Total_Avg_Accuracy',{'train': np.mean(acc_list_train), 'test': np.mean(acc_list_l)}, round)
-
-        logger.info('| ROUND: {} | For all users, mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean( acc_list_l), np.std( acc_list_l)))
         summary_writer.add_scalars('scalar/Total_Avg_Loss',{'train': np.mean(loss_list_train), 'test': np.mean(loss_list_l)}, round)
 
         if np.mean(acc_list_l) > best_acc:
             best_acc = np.mean(acc_list_l)
             best_std = np.std(acc_list_l)
             best_round = round
-
-        print('best results:')
-        print('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round, best_acc, best_std))
-        logger.info('best results:')
-        logger.info('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round, best_acc, best_std))
 def Fedproc(args, train_dataset, test_dataset, user_groups, user_groups_lt, local_model_list, classes_list):
 
     idxs_users = np.arange(args.num_users)
@@ -414,9 +396,7 @@ def Fedproc(args, train_dataset, test_dataset, user_groups, user_groups_lt, loca
         acc_list_l, loss_list_l,acc_list_g, loss_list,loss_total_list = test_inference_new_het_lt(args, local_model_list, test_dataset,classes_list, user_groups_lt)
         print('| ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(
             round, np.mean(acc_list_l), np.std(acc_list_l)))
-        logger.info(
-            '| ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(
-                round, np.mean(acc_list_l), np.std(acc_list_l)))
+        logger.info('| ROUND: {} | Test Acc: {:.5f}±{:.5f}'.format(round, np.mean(acc_list_l), np.std(acc_list_l)))
         summary_writer.add_scalar('scalar/Total_Test_Avg_Accuracy', np.mean(acc_list_l), round)
 
         if np.mean(acc_list_l) > best_acc:
@@ -424,12 +404,8 @@ def Fedproc(args, train_dataset, test_dataset, user_groups, user_groups_lt, loca
             best_std = np.std(acc_list_l)
             best_round = round
 
-    print('best results:')
-    print('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(
-        best_round, best_acc, best_std))
-    logger.info('best results:')
-    logger.info('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(
-        best_round, best_acc, best_std))
+    print('| BEST ROUND: {} | Test Acc: {:.5f}±{:.5f}'.format(best_round, best_acc, best_std))
+    logger.info('| BEST ROUND: {} | Test Acc: {:.5f}±{:.5f}'.format(best_round, best_acc, best_std))
 
 
 def FedProto_taskheter(args, train_dataset, test_dataset, user_groups, user_groups_lt, local_model_list, classes_list, summary_writer,logger,logdir):
@@ -469,11 +445,9 @@ def FedProto_taskheter(args, train_dataset, test_dataset, user_groups, user_grou
         acc_list_l, acc_list_g= test_inference_fedproto(args,logger, local_model_list, test_dataset,classes_list, user_groups_lt, global_protos)
 
         print('| ROUND: {} | For all users (w/o protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round,np.mean(acc_list_l), np.std(acc_list_l)))
-        logger.info('| ROUND: {} | For all users (w/o protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round,np.mean(acc_list_l),np.std(acc_list_l)))
+        logger.info('| ROUND: {} | Test Acc (w/o protos): {:.5f}±{:.5f}, Test Acc (w/ protos): {:.5f}±{:.5f}'.format(
+            round, np.mean(acc_list_l), np.std(acc_list_l), np.mean(acc_list_g), np.std(acc_list_g)))
         summary_writer.add_scalar('scalar/Total_Test_Avg_Accuracy', np.mean(acc_list_l), round)
-
-        print('| ROUND: {} | For all users (with protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round,np.mean(acc_list_g), np.std(acc_list_g)))
-        logger.info('| ROUND: {} | For all users (with protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean(acc_list_g), np.std(acc_list_g)))
         summary_writer.add_scalar('scalar/Total_Test_Avg_Accuracy_wp', np.mean(acc_list_g), round)
 
         if np.mean(acc_list_l) > best_acc:
@@ -485,15 +459,10 @@ def FedProto_taskheter(args, train_dataset, test_dataset, user_groups, user_grou
             best_std_w = np.std(acc_list_g)
             best_round_w = round
 
-    print('best wo results:')
-    print('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round, best_acc, best_std))
-    logger.info('best wo results:')
-    logger.info('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round, best_acc, best_std))
-
-    print('best w results:')
-    print('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round_w , best_acc_w ,best_std_w ))
-    logger.info('best w results:')
-    logger.info('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round_w ,best_acc_w ,best_std_w ))
+    print('| BEST ROUND (w/o protos): {} | Test Acc: {:.5f}±{:.5f}'.format(best_round, best_acc, best_std))
+    logger.info('| BEST ROUND (w/o protos): {} | Test Acc: {:.5f}±{:.5f}'.format(best_round, best_acc, best_std))
+    print('| BEST ROUND (w/ protos): {} | Test Acc: {:.5f}±{:.5f}'.format(best_round_w, best_acc_w, best_std_w))
+    logger.info('| BEST ROUND (w/ protos): {} | Test Acc: {:.5f}±{:.5f}'.format(best_round_w, best_acc_w, best_std_w))
 
 
 def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local_model_list, classes_list,summary_writer,logger,logdir):
@@ -508,8 +477,6 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         model_device = next(model.parameters()).device
         expected_device = torch.device(args.device)
         if model_device != expected_device:
-            print(f'Warning: Model {idx} is on {model_device}, expected {expected_device}, moving it now...')
-            logger.warning(f'Model {idx} is on {model_device}, expected {expected_device}, moving it now...')
             model.to(args.device)
     
     # global model: shares the same structure as the output layer of each local model
@@ -531,11 +498,6 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
     
     # ========== Initialize RFF models for SFD Statistics Aggregation ==========
     # This initialization only needs to be done once before the main loop
-    print('\n' + '='*60)
-    print('Initializing SFD Statistics Aggregation Components')
-    print('='*60)
-    logger.info('Initializing SFD Statistics Aggregation Components')
-    
     # Step 1: Get feature dimensions by running a dummy forward pass
     # Use the first client's model to determine feature dimensions
     dummy_model = copy.deepcopy(local_model_list[0])
@@ -563,9 +525,6 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
             low_feature_dim = dummy_output[3].shape[1]   # low-level feature dimension (索引3)
         else:
             raise ValueError(f"模型输出格式不符合预期，期望5个返回值，实际得到{len(dummy_output) if isinstance(dummy_output, tuple) else '非元组'}")
-    
-    print(f'Detected feature dimensions: high={high_feature_dim}, low={low_feature_dim}')
-    logger.info(f'Detected feature dimensions: high={high_feature_dim}, low={low_feature_dim}')
     
     # Step 2: Initialize RFF models for high and low levels
     # Set random seed for reproducibility
@@ -609,20 +568,13 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
     np.random.set_state(backup_rng_state['numpy'])
     torch.set_rng_state(backup_rng_state['torch'])
     
-    print(f'Initialized RFF models: high (d={high_feature_dim}, D={args.rf_dim_high}, gamma={args.rbf_gamma_high}), '
-          f'low (d={low_feature_dim}, D={args.rf_dim_low}, gamma={args.rbf_gamma_low})')
-    logger.info(f'Initialized RFF models: high (d={high_feature_dim}, D={args.rf_dim_high}, gamma={args.rbf_gamma_high}), '
-                f'low (d={low_feature_dim}, D={args.rf_dim_low}, gamma={args.rbf_gamma_low})')
-    print('='*60 + '\n')
+    logger.info(f'RFF Models: high(d={high_feature_dim}, D={args.rf_dim_high}, γ={args.rbf_gamma_high}), low(d={low_feature_dim}, D={args.rf_dim_low}, γ={args.rbf_gamma_low})')
     
     # Initialize global_stats to store the last round's statistics
     global_stats = None
     
     # ========== 保存数据分布元数据 (Metadata) ==========
     # 在训练开始前,收集并保存每个客户端的 pi_sample_per_class 和 classes_list
-    print('[Before Training] Saving data distribution metadata...')
-    logger.info('[Before Training] Saving data distribution metadata...')
-    
     # 收集每个客户端的 pi_sample_per_class
     client_pi_samples = {}
     for idx in idxs_users:
@@ -643,8 +595,6 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
     metadata_path = os.path.join(logdir, 'data_distribution_metadata.pkl')
     with open(metadata_path, 'wb') as f:
         pickle.dump(metadata_dict, f)
-    print(f'Saved data distribution metadata to {metadata_path}')
-    logger.info(f'Saved data distribution metadata to {metadata_path}')
     
     for round in tqdm(range(args.rounds)):
         local_weights, local_losses, local_high_protos, local_low_protos = [], [], {}, {}
@@ -669,7 +619,8 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
             # local model updating
             local_model = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[idx])
             # ABBL: 传递 total_rounds 参数用于计算余弦退火权重
-            w, loss, acc, high_protos, low_protos, idx_acc = local_model.update_weights_fedmps(
+            # 注意: update_weights_fedmps 返回的是按标签分类的特征字典，需要聚合后才成为原型
+            w, loss, acc, high_features_by_label, low_features_by_label, idx_acc = local_model.update_weights_fedmps(
                 args, idx, global_high_protos, global_low_protos, global_logits, 
                 model=copy.deepcopy(local_model_list[idx]), global_round=round,
                 total_rounds=args.rounds,  # ABBL: 传递总轮数用于余弦退火
@@ -683,8 +634,9 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
             loss_proto_high_list.append(loss['proto_high'])
             loss_proto_low_list.append(loss['proto_low'])
             loss_soft_list.append(loss['soft'])
-            agg_high_protos = agg_func(high_protos)
-            agg_low_protos = agg_func(low_protos)
+            # 将按标签分类的特征聚合为原型（每个类别的特征均值）
+            agg_high_protos = agg_func(high_features_by_label)
+            agg_low_protos = agg_func(low_features_by_label)
             local_weights.append(copy.deepcopy(w))
             local_losses.append(copy.deepcopy(loss['total']))
             local_high_protos[idx] = agg_high_protos
@@ -701,42 +653,49 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         global_low_protos = proto_aggregation(local_low_protos)
 
         # ========== SFD Statistics Aggregation Stage ==========
-        # Collect local statistics from all clients
-        print(f'[Round {round+1}] Collecting local statistics from all clients...')
-        logger.info(f'[Round {round+1}] Collecting local statistics from all clients...')
+        # 检查是否需要计算全局统计量
+        enable_stats_agg = getattr(args, 'enable_stats_agg', 0) == 1
+        enable_safs = getattr(args, 'enable_safs', 0) == 1
         
-        # 获取统计量计算层级（从 args 中获取，默认为 'high'）
-        stats_level = getattr(args, 'stats_level', 'high')
+        # 如果启用了 SAFS，必须启用统计量计算（SAFS 依赖全局统计量）
+        if enable_safs and not enable_stats_agg:
+            print(f'Warning: SAFS is enabled but statistics aggregation is disabled. Automatically enabling statistics aggregation.')
+            logger.warning('SAFS is enabled but statistics aggregation is disabled. Automatically enabling statistics aggregation.')
+            enable_stats_agg = True
         
-        client_responses = []
-        for idx in idxs_users:
-            local_model = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[idx])
-            local_stats = local_model.get_local_statistics(
-                model=copy.deepcopy(local_model_list[idx]),
-                rf_models=rf_models,
-                args=args,
+        if enable_stats_agg:
+            # Collect local statistics from all clients
+            # 获取统计量计算层级（从 args 中获取，默认为 'high'）
+            stats_level = getattr(args, 'stats_level', 'high')
+            
+            client_responses = []
+            for idx in idxs_users:
+                local_model = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[idx])
+                local_stats = local_model.get_local_statistics(
+                    model=copy.deepcopy(local_model_list[idx]),
+                    rf_models=rf_models,
+                    args=args,
+                    stats_level=stats_level
+                )
+                client_responses.append(local_stats)
+            
+            # Aggregate global statistics
+            global_stats = aggregate_global_statistics(
+                client_responses=client_responses,
+                class_num=args.num_classes,
                 stats_level=stats_level
             )
-            client_responses.append(local_stats)
-        
-        # Aggregate global statistics
-        print(f'[Round {round+1}] Aggregating global statistics...')
-        logger.info(f'[Round {round+1}] Aggregating global statistics...')
-        
-        global_stats = aggregate_global_statistics(
-            client_responses=client_responses,
-            class_num=args.num_classes,
-            stats_level=stats_level
-        )
-        
-        print(f'[Round {round+1}] Global statistics aggregation completed')
-        logger.info(f'[Round {round+1}] Global statistics aggregation completed')
+        else:
+            # 如果未启用统计量计算，设置为 None
+            global_stats = None
+            stats_level = None
         
         # ========== SFD SAFS Feature Synthesis Stage ==========
         # 如果启用了 SAFS，执行特征合成
         if getattr(args, 'enable_safs', 0) == 1:
-            print(f'[Round {round+1}] Starting SAFS feature synthesis...')
-            logger.info(f'[Round {round+1}] Starting SAFS feature synthesis...')
+            # SAFS 需要全局统计量，如果未启用统计量计算，应该已经在上面自动启用了
+            if global_stats is None:
+                raise ValueError('SAFS requires global statistics aggregation. Please enable --enable_stats_agg or it will be automatically enabled when SAFS is enabled.')
             
             # 确定使用的层级（与统计量聚合层级一致）
             level_to_use = stats_level if stats_level in ['high', 'low'] else 'high'
@@ -768,9 +727,6 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
             assert min(syn_nums) > feature_dim, \
                 f'最小合成特征数量 {min(syn_nums)} 必须大于特征维度 {feature_dim}'
             
-            print(f'[Round {round+1}] Synthetic feature numbers per class: {syn_nums}')
-            logger.info(f'[Round {round+1}] Synthetic feature numbers per class: {syn_nums}')
-            
             # 为每个类别创建 MeanCov Aligner
             aligners = []
             for c in range(args.num_classes):
@@ -794,15 +750,6 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
                 syn_num_per_class=syn_nums,
                 input_cov_eps=getattr(args, 'safs_input_cov_eps', 1e-5),
             )
-            
-            print(f'[Round {round+1}] SAFS feature synthesis completed')
-            logger.info(f'[Round {round+1}] SAFS feature synthesis completed')
-            print(f'[Round {round+1}] Generated synthetic features for {len(class_syn_datasets)} classes')
-            logger.info(f'[Round {round+1}] Generated synthetic features for {len(class_syn_datasets)} classes')
-            
-            # 可选：保存合成特征数据集（用于后续的分类器微调）
-            # 这里可以根据需要保存到文件或传递给分类器微调阶段
-            # 例如：torch.save(class_syn_datasets, f'{logdir}/synthetic_features_round_{round+1}.pt')
         else:
             class_syn_datasets = None
         
@@ -810,26 +757,17 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         # 根据是否启用 SAFS 选择不同的全局模型训练方式
         if getattr(args, 'enable_safs', 0) == 1 and class_syn_datasets is not None and len(class_syn_datasets) > 0:
             # 使用 SAFS 合成特征微调全局模型
-            print(f'[Round {round+1}] Fine-tuning global model using SAFS synthetic features...')
-            logger.info(f'[Round {round+1}] Fine-tuning global model using SAFS synthetic features...')
-            
             global_logits = fine_tune_global_model_safs(
                 args,
                 global_model,
                 class_syn_datasets,
-                global_high_protos,  # 注意：FedMPS主要使用 high_protos 进行分类层训练
+                global_high_protos,  # 注意：FedMPS主要使用全局高层原型进行分类层训练
                 summary_writer=summary_writer,
                 logger=logger,
                 round=round
             )
-            
-            print(f'[Round {round+1}] Global model fine-tuned using SAFS synthetic features.')
-            logger.info(f'[Round {round+1}] Global model fine-tuned using SAFS synthetic features.')
         else:
             # 使用原来的方法：基于本地原型训练全局模型
-            print(f'[Round {round+1}] Training global model using local prototypes...')
-            logger.info(f'[Round {round+1}] Training global model using local prototypes...')
-            
             # create inputs: local high-level prototypes
             global_data, global_label = get_global_input(local_high_protos)
             dataset = TensorDataset(global_data, global_label)
@@ -841,7 +779,7 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         print('| ROUND: {} | Train Loss - Total: {:.5f}, L_ACE: {:.5f}, L_A-SCL: {:.5f}, L_proto_high: {:.5f}, L_proto_low: {:.5f}, L_soft: {:.5f}, SCL_Weight: {:.5f}'.format(
             round, np.mean(loss_list_train), np.mean(loss_ace_list), np.mean(loss_scl_list), 
             np.mean(loss_proto_high_list), np.mean(loss_proto_low_list), np.mean(loss_soft_list), scl_weight))
-        logger.info('| ROUND: {} | Train Loss - Total: {:.5f}, L_ACE: {:.5f}, L_A-SCL: {:.5f}, L_proto_high: {:.5f}, L_proto_low: {:.5f}, L_soft: {:.5f}, SCL_Weight: {:.5f}'.format(
+        logger.info('| ROUND: {} | Train Loss: Total={:.5f}, ACE={:.5f}, SCL={:.5f}, Proto_H={:.5f}, Proto_L={:.5f}, Soft={:.5f}, SCL_W={:.5f}'.format(
             round, np.mean(loss_list_train), np.mean(loss_ace_list), np.mean(loss_scl_list),
             np.mean(loss_proto_high_list), np.mean(loss_proto_low_list), np.mean(loss_soft_list), scl_weight))
         summary_writer.add_scalar('scalar/Train_Total_Loss', np.mean(loss_list_train), round)
@@ -855,11 +793,12 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         # test
         acc_list_l, loss_list_l, acc_list_g, loss_list, loss_total_list = test_inference_new_het_lt(args,local_model_list,test_dataset,classes_list,user_groups_lt,global_high_protos)
 
-        # 记录每个客户端的准确率（细粒度性能记录）
-        for idx in range(args.num_users):
-            summary_writer.add_scalar(f'scalar/Client_{idx}_Test_Acc_wo_Protos', acc_list_l[idx], round)
-            if idx < len(acc_list_g):
-                summary_writer.add_scalar(f'scalar/Client_{idx}_Test_Acc_w_Protos', acc_list_g[idx], round)
+        # 记录每个客户端的准确率（细粒度性能记录，可选）
+        if getattr(args, 'log_client_acc', 0) == 1:
+            for idx in range(args.num_users):
+                summary_writer.add_scalar(f'scalar/Client_{idx}_Test_Acc_wo_Protos', acc_list_l[idx], round)
+                if idx < len(acc_list_g):
+                    summary_writer.add_scalar(f'scalar/Client_{idx}_Test_Acc_w_Protos', acc_list_g[idx], round)
 
         # 计算并记录标准差（用于评估公平性）
         std_acc_wo = np.std(acc_list_l)
@@ -868,19 +807,14 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         summary_writer.add_scalar('scalar/Total_Test_Std_Accuracy_w_Protos', std_acc_w, round)
 
         print('| ROUND: {} | For all users (w/o protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean(acc_list_l), std_acc_wo))
-        logger.info('| ROUND: {} | For all users (w/o protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean(acc_list_l), std_acc_wo))
+        logger.info('| ROUND: {} | Test Acc (w/o protos): {:.5f}±{:.5f}, Test Acc (w/ protos): {:.5f}±{:.5f}'.format(
+            round, np.mean(acc_list_l), std_acc_wo, np.mean(acc_list_g), std_acc_w))
         summary_writer.add_scalar('scalar/Total_Test_Avg_Accuracy', np.mean(acc_list_l), round)
-
-        print('| ROUND: {} | For all users (with protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean(acc_list_g), std_acc_w))
-        logger.info('| ROUND: {} | For all users (with protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean(acc_list_g), std_acc_w))
         summary_writer.add_scalar('scalar/Total_Test_Avg_Accuracy_wp', np.mean(acc_list_g), round)
 
         # ========== 原型稳定性分析 (Prototype Data) ==========
         # 每隔 10 个 Round,保存当前的 global_high_protos 和 global_low_protos
         if (round + 1) % 10 == 0:
-            print(f'[Round {round+1}] Saving prototype data for stability analysis...')
-            logger.info(f'[Round {round+1}] Saving prototype data for stability analysis...')
-            
             # 将原型转换为 CPU 并脱离计算图
             proto_data = {
                 'round': round + 1,
@@ -910,8 +844,6 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
             proto_save_path = os.path.join(logdir, f'prototypes_round_{round+1}.pkl')
             with open(proto_save_path, 'wb') as f:
                 pickle.dump(proto_data, f)
-            print(f'Saved prototype data to {proto_save_path}')
-            logger.info(f'Saved prototype data to {proto_save_path}')
 
         if np.mean(acc_list_l) > best_acc:
             best_acc = np.mean(acc_list_l)
@@ -922,15 +854,10 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
             best_std_w = np.std(acc_list_g)
             best_round_w = round
 
-    print('best wo results:')
-    print('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round, best_acc, best_std))
-    logger.info('best wo results:')
-    logger.info('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round, best_acc, best_std))
-
-    print('best w results:')
-    print('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round_w, best_acc_w, best_std_w))
-    logger.info('best w results:')
-    logger.info('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round_w, best_acc_w, best_std_w))
+    print('| BEST ROUND (w/o protos): {} | Test Acc: {:.5f}±{:.5f}'.format(best_round, best_acc, best_std))
+    logger.info('| BEST ROUND (w/o protos): {} | Test Acc: {:.5f}±{:.5f}'.format(best_round, best_acc, best_std))
+    print('| BEST ROUND (w/ protos): {} | Test Acc: {:.5f}±{:.5f}'.format(best_round_w, best_acc_w, best_std_w))
+    logger.info('| BEST ROUND (w/ protos): {} | Test Acc: {:.5f}±{:.5f}'.format(best_round_w, best_acc_w, best_std_w))
     
     # Save final SFD statistics (from the last round)
     # Use the same logdir pattern as the main function
@@ -942,8 +869,6 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         stats_save_path = os.path.join(save_dir, 'global_stats_final.pkl')
         with open(stats_save_path, 'wb') as f:
             pickle.dump(global_stats, f)
-        print(f'Saved final global statistics to {stats_save_path}')
-        logger.info(f'Saved final global statistics to {stats_save_path}')
     
     # Save RFF models state dict
     rf_models_save_path = os.path.join(save_dir, 'rf_models.pkl')
@@ -953,8 +878,6 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
     }
     with open(rf_models_save_path, 'wb') as f:
         pickle.dump(rf_models_state, f)
-    print(f'Saved RFF models to {rf_models_save_path}')
-    logger.info(f'Saved RFF models to {rf_models_save_path}')
     
     # Save metadata
     metadata = {
@@ -972,8 +895,6 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
     metadata_save_path = os.path.join(save_dir, 'metadata.pkl')
     with open(metadata_save_path, 'wb') as f:
         pickle.dump(metadata, f)
-    print(f'Saved metadata to {metadata_save_path}')
-    logger.info(f'Saved metadata to {metadata_save_path}')
 
 
 
@@ -1003,8 +924,10 @@ if __name__ == '__main__':
         datefmt='%Y/%m/%d/ %I:%M:%S %p', level=logging.DEBUG, filemode='w')
     logger = logging.getLogger()
     print("**Basic Setting...")
-    logger.info("**Basic Setting...")
     print('  ', args)
+    logging.info("="*60)
+    logging.info("Experiment Settings:")
+    logging.info("="*60)
     logging.info(args)
 
     summary_writer = SummaryWriter(logdir)

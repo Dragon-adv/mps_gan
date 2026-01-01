@@ -103,7 +103,7 @@ def args_parser():
 
     # for SFD SAFS (Synthetic Feature-based Decoupled training)
     # Note: For globally balanced datasets (e.g., CIFAR-10), synthetic feature numbers should be consistent
-    parser.add_argument('--enable_safs', type=int, default=1, 
+    parser.add_argument('--enable_safs', type=int, default=0, 
                         help='Enable SAFS feature synthesis (0: disabled, 1: enabled, default: 1)')
     parser.add_argument('--safs_steps', type=int, default=200, 
                         help='Number of optimization steps for SAFS feature synthesis')
@@ -134,6 +134,14 @@ def args_parser():
                         help='Final weight for L_A-SCL contrastive loss (cosine annealing target, default: 0.0)')
     parser.add_argument('--scl_temperature', type=float, default=0.07,
                         help='Temperature coefficient for L_A-SCL contrastive learning (default: 0.07). Note: different from --temperature which is for FedMPS contrastive loss (default: 0.5)')
+
+    # TensorBoard logging options
+    parser.add_argument('--log_client_acc', type=int, default=0,
+                        help='Whether to log each client\'s accuracy to TensorBoard (0: disabled, 1: enabled, default: 0)')
+
+    # SFD Statistics Aggregation options
+    parser.add_argument('--enable_stats_agg', type=int, default=0,
+                        help='Whether to enable global statistics aggregation (0: disabled, 1: enabled, default: 0). Required if SAFS is enabled.')
 
     args = parser.parse_args()
     return args
