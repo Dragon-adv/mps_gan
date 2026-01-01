@@ -154,15 +154,32 @@ def args_parser():
     parser.add_argument('--resume_ckpt_path', type=str, default=None,
                         help='Path to a checkpoint to resume Stage-1 training from (typically latest.pt)')
 
+    # Safety guard: prevent accidental overwrite of an existing run
+    parser.add_argument('--allow_restart', type=int, default=0,
+                        help='If 0, refuse to start from scratch when <log_dir>/stage1_ckpts/latest.pt exists. '
+                             'Set to 1 only when you intentionally want to restart and overwrite latest.pt. Default: 0')
+
     # Stage-1 checkpoints
     parser.add_argument('--stage', type=int, default=1,
                         help='Training stage selector (reserved for multi-stage pipeline). Default: 1')
+    # ===================== Stage-2 statistics aggregation =====================
+    # Stage-2 loads a Stage-1 checkpoint (typically best-wo.pt) and computes global statistics (low-only by default).
+    parser.add_argument('--stage1_ckpt_path', type=str, default=None,
+                        help='[Stage-2] Path to a Stage-1 checkpoint to load (e.g., <log_dir>/stage1_ckpts/best-wo.pt). '
+                             'If provided, stage-2 will infer log_dir/split_path from the checkpoint meta when possible.')
+    parser.add_argument('--stage2_out_dir', type=str, default=None,
+                        help='[Stage-2] Output directory to save stage-2 aggregated statistics. '
+                             'If None, defaults to <ckpt.meta.logdir>/stage2_stats (or <log_dir>/stage2_stats).')
     parser.add_argument('--stage1_ckpt_dir', type=str, default=None,
                         help='Directory to store Stage-1 checkpoints. If None, defaults to <log_dir>/stage1_ckpts')
     parser.add_argument('--save_latest_ckpt', type=int, default=1,
                         help='Whether to save latest checkpoint for resume (0/1). Default: 1')
     parser.add_argument('--latest_ckpt_interval', type=int, default=1,
                         help='Save latest checkpoint every N rounds (overwritten). Default: 1')
+    parser.add_argument('--save_latest_history', type=int, default=1,
+                        help='If 1, also save non-overwriting snapshots (latest_rXXXX.pt) to avoid losing progress. Default: 1')
+    parser.add_argument('--latest_history_interval', type=int, default=25,
+                        help='Save latest_rXXXX.pt every N rounds (non-overwrite). Default: 25')
     parser.add_argument('--save_best_ckpt', type=int, default=1,
                         help='Whether to save best checkpoints (best-wo/best-wp) without overwrite (0/1). Default: 1')
     parser.add_argument('--best_ckpt_overwrite', type=int, default=1,

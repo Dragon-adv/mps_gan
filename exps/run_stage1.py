@@ -44,7 +44,12 @@ def build_default_args() -> dict:
         "reuse_split": 1,
         "save_latest_ckpt": 1,
         "latest_ckpt_interval": 1,
+        # history snapshots (latest_rXXXX.pt)
+        "save_latest_history": 1,
+        "latest_history_interval": 25,
         "save_best_ckpt": 1,
+        # reduce best checkpoint count: overwrite best-wo.pt / best-wp.pt by default
+        "best_ckpt_overwrite": 1,
         "save_stage1_components": 1,
     }
 
@@ -69,6 +74,10 @@ def parse_overrides() -> argparse.Namespace:
     p.add_argument("--gama", type=float, default=None)
     p.add_argument("--reuse_split", type=int, default=None)
     p.add_argument("--latest_ckpt_interval", type=int, default=None)
+    p.add_argument("--save_latest_history", type=int, default=None)
+    p.add_argument("--latest_history_interval", type=int, default=None)
+    p.add_argument("--save_best_ckpt", type=int, default=None)
+    p.add_argument("--best_ckpt_overwrite", type=int, default=None)
 
     # 透传其它未知参数（例如你新增的各种实验开关），用 --extra "--key value --k2 v2"
     p.add_argument("--extra", type=str, default="", help="额外透传参数字符串")

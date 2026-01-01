@@ -887,57 +887,79 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         mean_wp = float(np.mean(acc_list_g)) if len(acc_list_g) > 0 else 0.0
 
         # Always keep a latest checkpoint for resume (overwrite), optionally every N rounds.
+        # Also keep non-overwriting historical snapshots (latest_rXXXX.pt) independently of latest_ckpt_interval.
+        payload_latest = None
+        do_save_latest = False
         if getattr(args, 'save_latest_ckpt', 1) == 1:
             interval = int(getattr(args, 'latest_ckpt_interval', 1))
             if interval <= 0:
                 interval = 1
-            if (round + 1) % interval == 0:
-                # Export component state_dicts if requested
-                comp_sd = None
-                if getattr(args, 'save_stage1_components', 1) == 1:
-                    comp_sd = {}
-                    for cid, m in enumerate(local_model_list):
-                        comp_sd[cid] = export_component_state_dicts(m)
+            do_save_latest = ((round + 1) % interval == 0)
 
-                payload = {
-                    'meta': {
-                        'stage': 1,
-                        'metric_type': 'latest',
-                        'round': round,
-                        'round_1based': round + 1,
-                        'mean_acc_wo': mean_wo,
-                        'mean_acc_wp': mean_wp,
-                        'dataset': args.dataset,
-                        'alg': args.alg,
-                        'num_users': args.num_users,
-                        'num_classes': args.num_classes,
-                        'logdir': logdir,
-                        'split_path': getattr(args, 'split_path', None),
+        do_save_hist = False
+        if int(getattr(args, 'save_latest_history', 1)) == 1:
+            h_interval = int(getattr(args, 'latest_history_interval', 25))
+            if h_interval <= 0:
+                h_interval = 25
+            do_save_hist = ((round + 1) % h_interval == 0)
+
+        if do_save_latest or do_save_hist:
+            # Export component state_dicts if requested
+            comp_sd = None
+            if getattr(args, 'save_stage1_components', 1) == 1:
+                comp_sd = {}
+                for cid, m in enumerate(local_model_list):
+                    comp_sd[cid] = export_component_state_dicts(m)
+
+            payload_latest = {
+                'meta': {
+                    'stage': 1,
+                    'metric_type': 'latest',
+                    'round': round,
+                    'round_1based': round + 1,
+                    'mean_acc_wo': mean_wo,
+                    'mean_acc_wp': mean_wp,
+                    'dataset': args.dataset,
+                    'alg': args.alg,
+                    'num_users': args.num_users,
+                    'num_classes': args.num_classes,
+                    'logdir': logdir,
+                    'split_path': getattr(args, 'split_path', None),
+                },
+                'args': vars(args),
+                'rng_state': get_rng_state(),
+                'state': {
+                    'local_models_full_state_dicts': {cid: m.state_dict() for cid, m in enumerate(local_model_list)},
+                    'components_state_dicts': comp_sd,
+                    'global_high_protos': global_high_protos,
+                    'global_low_protos': global_low_protos,
+                    'global_logits': global_logits,
+                    'global_stats': global_stats,
+                    'rf_models_state': {
+                        'high': rf_models['high'].state_dict() if rf_models and 'high' in rf_models else None,
+                        'low': rf_models['low'].state_dict() if rf_models and 'low' in rf_models else None,
                     },
-                    'args': vars(args),
-                    'rng_state': get_rng_state(),
-                    'state': {
-                        'local_models_full_state_dicts': {cid: m.state_dict() for cid, m in enumerate(local_model_list)},
-                        'components_state_dicts': comp_sd,
-                        'global_high_protos': global_high_protos,
-                        'global_low_protos': global_low_protos,
-                        'global_logits': global_logits,
-                        'global_stats': global_stats,
-                        'rf_models_state': {
-                            'high': rf_models['high'].state_dict() if rf_models and 'high' in rf_models else None,
-                            'low': rf_models['low'].state_dict() if rf_models and 'low' in rf_models else None,
-                        },
-                        'best': {
-                            'best_acc': best_acc,
-                            'best_std': best_std,
-                            'best_round': best_round,
-                            'best_acc_w': best_acc_w,
-                            'best_std_w': best_std_w,
-                            'best_round_w': best_round_w,
-                        },
+                    'best': {
+                        'best_acc': best_acc,
+                        'best_std': best_std,
+                        'best_round': best_round,
+                        'best_acc_w': best_acc_w,
+                        'best_std_w': best_std_w,
+                        'best_round_w': best_round_w,
                     },
-                }
-                save_latest(ckpt_dir=ckpt_dir, payload=payload, filename='latest.pt')
+                },
+            }
+
+            if do_save_latest:
+                save_latest(ckpt_dir=ckpt_dir, payload=payload_latest, filename='latest.pt')
+
+            if do_save_hist:
+                snap_name = f"latest_r{round + 1:04d}.pt"
+                try:
+                    save_latest(ckpt_dir=ckpt_dir, payload=payload_latest, filename=snap_name)
+                except Exception as e:
+                    # Do not crash training if snapshot saving fails (disk full, permission, etc.)
+                    print(f"Warning: failed to save snapshot checkpoint {snap_name} ({e})")
 
         # Save best checkpoints without overwrite
         if getattr(args, 'save_best_ckpt', 1) == 1:
@@ -1108,6 +1130,48 @@ if __name__ == '__main__':
         
     exp_details(args)
 
+    # ===================== Stage-2: Statistics Aggregation (low-only) =====================
+    # Stage-2 loads a Stage-1 checkpoint (typically best-wo.pt) and computes global statistics once.
+    stage = int(getattr(args, 'stage', 1))
+    stage2_payload = None
+    if stage == 2:
+        if getattr(args, 'stage1_ckpt_path', None) is None:
+            raise ValueError('Stage-2 requires --stage1_ckpt_path (e.g., <log_dir>/stage1_ckpts/best-wo.pt).')
+        try:
+            stage2_payload = load_checkpoint(args.stage1_ckpt_path, map_location='cpu')
+        except Exception as e:
+            raise RuntimeError(f'Failed to load Stage-1 checkpoint from --stage1_ckpt_path: {args.stage1_ckpt_path} ({e})')
+
+        if isinstance(stage2_payload, dict):
+            ckpt_meta = stage2_payload.get('meta', {}) or {}
+            ckpt_args = stage2_payload.get('args', {}) or {}
+        else:
+            raise ValueError(f'Invalid checkpoint payload type: {type(stage2_payload)}')
+
+        # Force key dataset/model-shape arguments to match Stage-1 checkpoint for correct model reconstruction.
+        for k in [
+            'dataset', 'alg', 'num_users', 'num_classes',
+            'ways', 'shots', 'train_shots_max', 'test_shots', 'stdev',
+            'mode', 'model', 'num_channels',
+        ]:
+            if k in ckpt_args:
+                try:
+                    setattr(args, k, ckpt_args[k])
+                except Exception:
+                    pass
+
+        # Infer log_dir from checkpoint meta if not provided
+        if args.log_dir is None:
+            meta_logdir = ckpt_meta.get('logdir', None)
+            if meta_logdir:
+                args.log_dir = meta_logdir
+
+        # Force split_path reuse (Stage-2 should be consistent with Stage-1 split)
+        if getattr(args, 'split_path', None) is None:
+            meta_split = ckpt_meta.get('split_path', None)
+            if meta_split:
+                args.split_path = meta_split
+
     # If resuming and user didn't provide log_dir, infer it from resume_ckpt_path
     if getattr(args, 'resume_ckpt_path', None) and args.log_dir is None:
         ckpt_abs = os.path.abspath(args.resume_ckpt_path)
@@ -1125,6 +1189,21 @@ if __name__ == '__main__':
         logdir = os.path.join('../newresults', args.alg, str(datetime.datetime.now().strftime("%Y-%m-%d/%H.%M.%S"))+'_'+args.dataset+'_n'+str(args.ways))
     mkdirs(logdir)
 
+    # ===================== Safety guard: prevent accidental overwrite =====================
+    # If the user points to an existing logdir that already has a latest checkpoint, we refuse to
+    # start from scratch unless allow_restart=1. This prevents "latest.pt got overwritten by a new run".
+    ckpt_dir_default = os.path.join(logdir, 'stage1_ckpts')
+    latest_default = os.path.join(ckpt_dir_default, 'latest.pt')
+    if stage != 2 and getattr(args, 'resume_ckpt_path', None) is None:
+        if os.path.exists(latest_default) and int(getattr(args, 'allow_restart', 0)) != 1:
+            raise RuntimeError(
+                "检测到该 log_dir 下已存在 stage1_ckpts/latest.pt，但你没有指定 --resume_ckpt_path。\n"
+                "为避免误覆盖断点文件，程序已停止。\n"
+                "解决方案：\n"
+                "  1) 断点续训：加上 --resume_ckpt_path \"<log_dir>\\stage1_ckpts\\latest.pt\"\n"
+                "  2) 确认要从头重跑并覆盖 latest.pt：加上 --allow_restart 1\n"
+            )
+
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
     logging.basicConfig(
@@ -1139,7 +1218,10 @@ if __name__ == '__main__':
     logging.info("="*60)
     logging.info(args)
 
-    summary_writer = SummaryWriter(logdir)
+    # Put TensorBoard events into a subdir to avoid mixing with checkpoints/other artifacts.
+    tb_logdir = os.path.join(logdir, 'tb')
+    mkdirs(tb_logdir)
+    summary_writer = SummaryWriter(tb_logdir)
 
     # set random seeds
     args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -1152,12 +1234,203 @@ if __name__ == '__main__':
     np.random.seed(args.seed)
     random.seed(args.seed)
 
+    # Run Stage-2 early and exit (no training loop)
+    if stage == 2:
+        logger.info("="*60)
+        logger.info("Stage-2: Statistics Aggregation (low-only)")
+        logger.info("="*60)
+        logger.info(f"stage1_ckpt_path = {args.stage1_ckpt_path}")
+
+        ckpt_meta = stage2_payload.get('meta', {}) or {}
+        ckpt_state = stage2_payload.get('state', {}) or {}
+
+        # Resolve output dir
+        stage2_out_dir = getattr(args, 'stage2_out_dir', None)
+        if stage2_out_dir is None:
+            stage2_out_dir = os.path.join(logdir, 'stage2_stats')
+        mkdirs(stage2_out_dir)
+
+        # Stage-2 requires a persisted split for consistency
+        if getattr(args, 'split_path', None) is None:
+            raise ValueError('Stage-2 requires split_path (can be inferred from checkpoint meta).')
+        if not os.path.exists(args.split_path):
+            raise FileNotFoundError(f'Stage-2 requires an existing split file, but not found: {args.split_path}')
+
+        loaded_split = load_split(args.split_path)
+        n_list = loaded_split['n_list']
+        k_list = loaded_split['k_list']
+        train_dataset, test_dataset, _, _, _, _ = get_dataset(args, n_list, k_list)
+        user_groups = loaded_split['user_groups']
+        user_groups_lt = loaded_split['user_groups_lt']
+        classes_list = loaded_split['classes_list']
+        classes_list_gt = loaded_split.get('classes_list_gt', classes_list)
+
+        # Rebuild client models and load per-client weights from Stage-1 checkpoint
+        local_model_list = []
+        for i in range(args.num_users):
+            if args.dataset == 'mnist':
+                if args.mode == 'model_heter':
+                    if i < 7:
+                        args.out_channels = 18
+                    elif i >= 7 and i < 14:
+                        args.out_channels = 20
+                    else:
+                        args.out_channels = 22
+                else:
+                    args.out_channels = 20
+                local_model = CNNMnist(args=args)
+            elif args.dataset == 'femnist':
+                if args.mode == 'model_heter':
+                    if i < 7:
+                        args.out_channels = 18
+                    elif i >= 7 and i < 14:
+                        args.out_channels = 20
+                    else:
+                        args.out_channels = 22
+                else:
+                    args.out_channels = 20
+                local_model = CNNFemnist(args=args)
+            elif args.dataset == 'cifar10' or args.dataset == 'cifar100' or args.dataset == 'flowers' or args.dataset == 'defungi':
+                local_model = CNNCifar(args=args)
+            elif args.dataset == 'tinyimagenet':
+                args.num_classes = 200
+                local_model = ModelCT(out_dim=256, n_classes=args.num_classes)
+            elif args.dataset == 'realwaste':
+                local_model = CNNCifar(args=args)
+            elif args.dataset == 'fashion':
+                local_model = CNNFashion_Mnist(args=args)
+            elif args.dataset == 'imagenet':
+                local_model = ResNetWithFeatures(base='resnet18', num_classes=args.num_classes)
+            else:
+                raise ValueError(f'Unsupported dataset for Stage-2: {args.dataset}')
+
+            local_model.to(args.device)
+            local_model.eval()
+            local_model_list.append(local_model)
+
+        local_sd = ckpt_state.get('local_models_full_state_dicts', None)
+        if not isinstance(local_sd, dict):
+            raise ValueError("Checkpoint missing state['local_models_full_state_dicts'] for Stage-2.")
+        for cid, m in enumerate(local_model_list):
+            key = cid
+            if key not in local_sd and str(cid) in local_sd:
+                key = str(cid)
+            if key in local_sd:
+                m.load_state_dict(local_sd[key], strict=True)
+            else:
+                raise KeyError(f'Checkpoint local_models_full_state_dicts missing client id={cid}')
+
+        # Build low-level RFF model (d inferred from a dummy forward)
+        dummy_model = copy.deepcopy(local_model_list[0]).to(args.device).eval()
+        if args.dataset == 'mnist' or args.dataset == 'femnist' or args.dataset == 'fashion':
+            dummy_input = torch.randn(1, 1, 28, 28).to(args.device)
+        elif args.dataset == 'tinyimagenet':
+            dummy_input = torch.randn(1, 3, 64, 64).to(args.device)
+        elif args.dataset == 'imagenet':
+            dummy_input = torch.randn(1, 3, 224, 224).to(args.device)
+        else:
+            dummy_input = torch.randn(1, 3, 32, 32).to(args.device)
+        with torch.no_grad():
+            dummy_output = dummy_model(dummy_input)
+            if isinstance(dummy_output, tuple) and len(dummy_output) >= 4:
+                low_feature_dim = dummy_output[3].shape[1]
+            else:
+                raise ValueError('Dummy model output format unexpected for Stage-2.')
+
+        backup_rng_state = {
+            'python': random.getstate(),
+            'numpy': np.random.get_state(),
+            'torch': torch.get_rng_state()
+        }
+        random.seed(args.rf_seed)
+        np.random.seed(args.rf_seed)
+        torch.manual_seed(args.rf_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.rf_seed)
+
+        rf_model_low = RFF(
+            d=low_feature_dim,
+            D=args.rf_dim_low,
+            gamma=args.rbf_gamma_low,
+            device=args.device,
+            rf_type=args.rf_type
+        )
+        rf_models = {'low': rf_model_low}
+
+        random.setstate(backup_rng_state['python'])
+        np.random.set_state(backup_rng_state['numpy'])
+        torch.set_rng_state(backup_rng_state['torch'])
+
+        # Collect local statistics (low-only) and aggregate
+        client_responses = []
+        for idx in range(args.num_users):
+            local_upd = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[idx])
+            if hasattr(local_upd, 'get_local_statistics_streaming'):
+                local_stats = local_upd.get_local_statistics_streaming(
+                    model=copy.deepcopy(local_model_list[idx]),
+                    rf_models=rf_models,
+                    args=args,
+                    stats_level='low'
+                )
+            else:
+                local_stats = local_upd.get_local_statistics(
+                    model=copy.deepcopy(local_model_list[idx]),
+                    rf_models=rf_models,
+                    args=args,
+                    stats_level='low'
+                )
+            client_responses.append(local_stats)
+
+        global_stats = aggregate_global_statistics(
+            client_responses=client_responses,
+            class_num=args.num_classes,
+            stats_level='low'
+        )
+
+        stage2_meta = {
+            'stage': 2,
+            'metric_type': 'stats-agg',
+            'dataset': args.dataset,
+            'alg': args.alg,
+            'num_users': args.num_users,
+            'num_classes': args.num_classes,
+            'logdir': logdir,
+            'split_path': getattr(args, 'split_path', None),
+            'stage1_ckpt_path': args.stage1_ckpt_path,
+            'stage1_meta': ckpt_meta,
+            'low_feature_dim': low_feature_dim,
+            'rf_dim_low': args.rf_dim_low,
+            'rbf_gamma_low': args.rbf_gamma_low,
+            'rf_seed': args.rf_seed,
+            'rf_type': args.rf_type,
+        }
+        out_payload = {
+            'meta': stage2_meta,
+            'args': vars(args),
+            'state': {
+                'global_stats': global_stats,
+                'rf_models_state': {'low': rf_model_low.state_dict()},
+            },
+        }
+
+        # Persist
+        torch.save(out_payload, os.path.join(stage2_out_dir, 'global_stats.pt'))
+        with open(os.path.join(stage2_out_dir, 'global_stats.pkl'), 'wb') as f:
+            pickle.dump(out_payload, f)
+
+        print(f"[Stage-2] Saved global statistics to: {stage2_out_dir}")
+        raise SystemExit(0)
+
     # ===================== Resume Stage-1 (optional) =====================
     resume_payload = None
     if getattr(args, 'resume_ckpt_path', None):
         try:
             resume_payload = load_checkpoint(args.resume_ckpt_path, map_location='cpu')
+            meta = resume_payload.get('meta', {}) if isinstance(resume_payload, dict) else {}
             print(f"Loaded resume checkpoint: {args.resume_ckpt_path}")
+            if isinstance(meta, dict) and len(meta) > 0:
+                print(f"  ckpt.meta.round = {meta.get('round', None)} (0-based), round_1based = {meta.get('round_1based', None)}")
+                print(f"  ckpt.meta.logdir = {meta.get('logdir', None)}")
         except Exception as e:
             print(f"Failed to load resume checkpoint: {args.resume_ckpt_path} ({e})")
             resume_payload = None

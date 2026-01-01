@@ -42,3 +42,35 @@ python federated_main.py --alg ours --dataset fashion --num_classes 10 --num_use
 ```
 python federated_main.py --alg ours --dataset femnist --num_classes 62 --num_users 20 --ways 3 --shots 95 --train_shots_max 96 --test_shots 15 --stdev 1 --gama 10 --beta 1 --rounds 1000
 ```
+
+----
+
+目前我通过如下命令来训练FedMPS：
+
+python exps/federated_main.py --alg ours --dataset cifar10 --num_classes 10 --num_users 20 --ways 3 --shots 100 --train_shots_max 110 --test_shots 15 --stdev 1 --alph 0.1 --beta 0.02 --gama 5 --rounds 300 --gpu 0
+
+现在我想要对该训练方法进行进一步的改进：
+
+想要将其向着SFD中的解耦多阶段训练靠拢，
+
+想要使用上方的方式，让每个客户端先训练一下各自的本地模型，保存成 低级编码器 高级编码器 投影器 分类头 4个组件。
+
+在一阶段训练结束后，我想要每个客户端将本地的图片经过 低级编码器 编码成 低级特征 ，通过添加 一点 基于全局的均值和协方差 生成的 噪声 来实现隐私保护，然后汇聚到全局，来训练一个GAN网络，用它来生成 虚拟合成的低级特征，然后将其分发给每个客户端（补充缺失类 或 样本稀少的类），然后再将 虚拟合成特诊和本地真实的编码低级特征 混合 构建一个训练集，来训练 本地的 高级编码器 投影器 分类头
+
+目前我要进行一阶段的代码调整，然后进行一阶段的训练，目前先为我制定一个一阶段的代码调整方案
+
+---
+
+断点恢复训练：
+
+```bash
+python exps\run_stage1.py --log_dir "<LOGDIR>" --resume_ckpt_path "<LOGDIR>\stage1_ckpts\latest.pt" --reuse_split 1 --rounds 300 --latest_ckpt_interval 20
+```
+
+建议（避免 latest.pt 被误覆盖）：
+- 默认情况下，如果 `<LOGDIR>\stage1_ckpts\latest.pt` 已存在但你没有传 `--resume_ckpt_path`，程序会直接报错停止，防止误覆盖。
+- 如果你确认要从头重跑并允许覆盖 latest.pt，请显式加 `--allow_restart 1`。
+- 稳妥起见，程序会额外按间隔保存不覆盖快照：`latest_rXXXX.pt`（可用 `--latest_history_interval` 调整）。
+
+----
+
