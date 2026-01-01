@@ -123,6 +123,26 @@ class CNNCifar(nn.Module):
             nn.Linear(256, 128)
         )
 
+    def get_component_state_dicts(self):
+        """
+        Export 4-component state_dicts for Stage-1 multi-stage pipeline:
+        - low_encoder: conv1 + conv2
+        - high_encoder: fc0
+        - projector: projector
+        - classifier_head: fc1 + fc2
+        """
+        sd = self.state_dict()
+        low = {k: v for k, v in sd.items() if k.startswith('conv1.') or k.startswith('conv2.')}
+        high = {k: v for k, v in sd.items() if k.startswith('fc0.')}
+        proj = {k: v for k, v in sd.items() if k.startswith('projector.')}
+        head = {k: v for k, v in sd.items() if k.startswith('fc1.') or k.startswith('fc2.')}
+        return {
+            'low_encoder': low,
+            'high_encoder': high,
+            'projector': proj,
+            'classifier_head': head,
+        }
+
     def forward(self, x):
         # 1. 低级特征阶段
         feat_low_raw = self.pool(F.relu(self.conv1(x)))

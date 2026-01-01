@@ -143,5 +143,32 @@ def args_parser():
     parser.add_argument('--enable_stats_agg', type=int, default=0,
                         help='Whether to enable global statistics aggregation (0: disabled, 1: enabled, default: 0). Required if SAFS is enabled.')
 
+    # ===================== Stage-1 persistence / checkpointing =====================
+    # Dataset split persistence (for multi-stage consistency)
+    parser.add_argument('--split_path', type=str, default=None,
+                        help='Path to persist/reuse dataset split (pickle). If None, defaults to <log_dir>/split.pkl')
+    parser.add_argument('--reuse_split', type=int, default=1,
+                        help='If split_path exists, reuse it (1) or regenerate and overwrite (0). Default: 1')
+
+    # Resume training
+    parser.add_argument('--resume_ckpt_path', type=str, default=None,
+                        help='Path to a checkpoint to resume Stage-1 training from (typically latest.pt)')
+
+    # Stage-1 checkpoints
+    parser.add_argument('--stage', type=int, default=1,
+                        help='Training stage selector (reserved for multi-stage pipeline). Default: 1')
+    parser.add_argument('--stage1_ckpt_dir', type=str, default=None,
+                        help='Directory to store Stage-1 checkpoints. If None, defaults to <log_dir>/stage1_ckpts')
+    parser.add_argument('--save_latest_ckpt', type=int, default=1,
+                        help='Whether to save latest checkpoint for resume (0/1). Default: 1')
+    parser.add_argument('--latest_ckpt_interval', type=int, default=1,
+                        help='Save latest checkpoint every N rounds (overwritten). Default: 1')
+    parser.add_argument('--save_best_ckpt', type=int, default=1,
+                        help='Whether to save best checkpoints (best-wo/best-wp) without overwrite (0/1). Default: 1')
+    parser.add_argument('--best_ckpt_overwrite', type=int, default=1,
+                        help='If 1, keep only one best-wo.pt and one best-wp.pt by overwriting. If 0, keep historical best checkpoints with round/metrics in filename. Default: 1')
+    parser.add_argument('--save_stage1_components', type=int, default=1,
+                        help='Whether to export 4-component state_dicts (low/high/projector/head) into checkpoints (0/1). Default: 1')
+
     args = parser.parse_args()
     return args

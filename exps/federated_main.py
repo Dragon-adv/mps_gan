@@ -29,6 +29,15 @@ from lib.options import *
 from lib.update import *
 from lib.models.models import *
 from lib.utils import *
+from lib.split_manager import load_split, save_split
+from lib.checkpoint import (
+    get_rng_state,
+    set_rng_state,
+    export_component_state_dicts,
+    save_latest,
+    save_best,
+    load_checkpoint,
+)
 from lib.sfd_utils import RFF, aggregate_global_statistics
 from lib.safs import MeanCovAligner, feature_synthesis, make_syn_nums
 
@@ -495,6 +504,20 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
     best_acc_w = -float('inf')  # best results w protos
     best_std_w = -float('inf')
     best_round_w = 0
+
+    # Resume (Stage-1) state
+    start_round = getattr(args, 'start_round', 0)
+    resume_state = getattr(args, 'resume_state', None)
+    if isinstance(resume_state, dict):
+        global_high_protos = resume_state.get('global_high_protos', global_high_protos) or {}
+        global_low_protos = resume_state.get('global_low_protos', global_low_protos) or {}
+        global_logits = resume_state.get('global_logits', global_logits) or {}
+        best_acc = resume_state.get('best_acc', best_acc)
+        best_std = resume_state.get('best_std', best_std)
+        best_round = resume_state.get('best_round', best_round)
+        best_acc_w = resume_state.get('best_acc_w', best_acc_w)
+        best_std_w = resume_state.get('best_std_w', best_std_w)
+        best_round_w = resume_state.get('best_round_w', best_round_w)
     
     # ========== Initialize RFF models for SFD Statistics Aggregation ==========
     # This initialization only needs to be done once before the main loop
@@ -596,7 +619,7 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
     with open(metadata_path, 'wb') as f:
         pickle.dump(metadata_dict, f)
     
-    for round in tqdm(range(args.rounds)):
+    for round in tqdm(range(start_round, args.rounds)):
         local_weights, local_losses, local_high_protos, local_low_protos = [], [], {}, {}
         print(f'\n | Global Training Round : {round + 1} |\n')
 
@@ -854,6 +877,181 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
             best_std_w = np.std(acc_list_g)
             best_round_w = round
 
+        # ========== Stage-1 Checkpointing (latest overwrite + best-wo/wp no-overwrite) ==========
+        ckpt_dir = getattr(args, 'stage1_ckpt_dir', None)
+        if ckpt_dir is None:
+            ckpt_dir = os.path.join(logdir, 'stage1_ckpts')
+        mkdirs(ckpt_dir)
+
+        mean_wo = float(np.mean(acc_list_l)) if len(acc_list_l) > 0 else 0.0
+        mean_wp = float(np.mean(acc_list_g)) if len(acc_list_g) > 0 else 0.0
+
+        # Always keep a latest checkpoint for resume (overwrite), optionally every N rounds.
+        if getattr(args, 'save_latest_ckpt', 1) == 1:
+            interval = int(getattr(args, 'latest_ckpt_interval', 1))
+            if interval <= 0:
+                interval = 1
+            if (round + 1) % interval == 0:
+                # Export component state_dicts if requested
+                comp_sd = None
+                if getattr(args, 'save_stage1_components', 1) == 1:
+                    comp_sd = {}
+                    for cid, m in enumerate(local_model_list):
+                        comp_sd[cid] = export_component_state_dicts(m)
+
+                payload = {
+                    'meta': {
+                        'stage': 1,
+                        'metric_type': 'latest',
+                        'round': round,
+                        'round_1based': round + 1,
+                        'mean_acc_wo': mean_wo,
+                        'mean_acc_wp': mean_wp,
+                        'dataset': args.dataset,
+                        'alg': args.alg,
+                        'num_users': args.num_users,
+                        'num_classes': args.num_classes,
+                        'logdir': logdir,
+                        'split_path': getattr(args, 'split_path', None),
+                    },
+                    'args': vars(args),
+                    'rng_state': get_rng_state(),
+                    'state': {
+                        'local_models_full_state_dicts': {cid: m.state_dict() for cid, m in enumerate(local_model_list)},
+                        'components_state_dicts': comp_sd,
+                        'global_high_protos': global_high_protos,
+                        'global_low_protos': global_low_protos,
+                        'global_logits': global_logits,
+                        'global_stats': global_stats,
+                        'rf_models_state': {
+                            'high': rf_models['high'].state_dict() if rf_models and 'high' in rf_models else None,
+                            'low': rf_models['low'].state_dict() if rf_models and 'low' in rf_models else None,
+                        },
+                        'best': {
+                            'best_acc': best_acc,
+                            'best_std': best_std,
+                            'best_round': best_round,
+                            'best_acc_w': best_acc_w,
+                            'best_std_w': best_std_w,
+                            'best_round_w': best_round_w,
+                        },
+                    },
+                }
+                save_latest(ckpt_dir=ckpt_dir, payload=payload, filename='latest.pt')
+
+        # Save best checkpoints without overwrite
+        if getattr(args, 'save_best_ckpt', 1) == 1:
+            best_overwrite = int(getattr(args, 'best_ckpt_overwrite', 1)) == 1
+            # best-wo trigger
+            if best_round == round:
+                comp_sd = None
+                if getattr(args, 'save_stage1_components', 1) == 1:
+                    comp_sd = {}
+                    for cid, m in enumerate(local_model_list):
+                        comp_sd[cid] = export_component_state_dicts(m)
+                payload = {
+                    'meta': {
+                        'stage': 1,
+                        'metric_type': 'best-wo',
+                        'round': round,
+                        'round_1based': round + 1,
+                        'mean_acc_wo': mean_wo,
+                        'mean_acc_wp': mean_wp,
+                        'dataset': args.dataset,
+                        'alg': args.alg,
+                        'num_users': args.num_users,
+                        'num_classes': args.num_classes,
+                        'logdir': logdir,
+                        'split_path': getattr(args, 'split_path', None),
+                    },
+                    'args': vars(args),
+                    'rng_state': get_rng_state(),
+                    'state': {
+                        'local_models_full_state_dicts': {cid: m.state_dict() for cid, m in enumerate(local_model_list)},
+                        'components_state_dicts': comp_sd,
+                        'global_high_protos': global_high_protos,
+                        'global_low_protos': global_low_protos,
+                        'global_logits': global_logits,
+                        'global_stats': global_stats,
+                        'rf_models_state': {
+                            'high': rf_models['high'].state_dict() if rf_models and 'high' in rf_models else None,
+                            'low': rf_models['low'].state_dict() if rf_models and 'low' in rf_models else None,
+                        },
+                        'best': {
+                            'best_acc': best_acc,
+                            'best_std': best_std,
+                            'best_round': best_round,
+                            'best_acc_w': best_acc_w,
+                            'best_std_w': best_std_w,
+                            'best_round_w': best_round_w,
+                        },
+                    },
+                }
+                save_best(
+                    ckpt_dir=ckpt_dir,
+                    metric_type='best-wo',
+                    round_idx=round + 1,
+                    mean_acc_wo=mean_wo,
+                    mean_acc_wp=mean_wp,
+                    payload=payload,
+                    overwrite=best_overwrite,
+                )
+
+            # best-wp trigger
+            if best_round_w == round:
+                comp_sd = None
+                if getattr(args, 'save_stage1_components', 1) == 1:
+                    comp_sd = {}
+                    for cid, m in enumerate(local_model_list):
+                        comp_sd[cid] = export_component_state_dicts(m)
+                payload = {
+                    'meta': {
+                        'stage': 1,
+                        'metric_type': 'best-wp',
+                        'round': round,
+                        'round_1based': round + 1,
+                        'mean_acc_wo': mean_wo,
+                        'mean_acc_wp': mean_wp,
+                        'dataset': args.dataset,
+                        'alg': args.alg,
+                        'num_users': args.num_users,
+                        'num_classes': args.num_classes,
+                        'logdir': logdir,
+                        'split_path': getattr(args, 'split_path', None),
+                    },
+                    'args': vars(args),
+                    'rng_state': get_rng_state(),
+                    'state': {
+                        'local_models_full_state_dicts': {cid: m.state_dict() for cid, m in enumerate(local_model_list)},
+                        'components_state_dicts': comp_sd,
+                        'global_high_protos': global_high_protos,
+                        'global_low_protos': global_low_protos,
+                        'global_logits': global_logits,
+                        'global_stats': global_stats,
+                        'rf_models_state': {
+                            'high': rf_models['high'].state_dict() if rf_models and 'high' in rf_models else None,
+                            'low': rf_models['low'].state_dict() if rf_models and 'low' in rf_models else None,
+                        },
+                        'best': {
+                            'best_acc': best_acc,
+                            'best_std': best_std,
+                            'best_round': best_round,
+                            'best_acc_w': best_acc_w,
+                            'best_std_w': best_std_w,
+                            'best_round_w': best_round_w,
+                        },
+                    },
+                }
+                save_best(
+                    ckpt_dir=ckpt_dir,
+                    metric_type='best-wp',
+                    round_idx=round + 1,
+                    mean_acc_wo=mean_wo,
+                    mean_acc_wp=mean_wp,
+                    payload=payload,
+                    overwrite=best_overwrite,
+                )
+
     print('| BEST ROUND (w/o protos): {} | Test Acc: {:.5f}±{:.5f}'.format(best_round, best_acc, best_std))
     logger.info('| BEST ROUND (w/o protos): {} | Test Acc: {:.5f}±{:.5f}'.format(best_round, best_acc, best_std))
     print('| BEST ROUND (w/ protos): {} | Test Acc: {:.5f}±{:.5f}'.format(best_round_w, best_acc_w, best_std_w))
@@ -909,6 +1107,17 @@ if __name__ == '__main__':
         args.rf_seed = secrets.randbelow(2**31)
         
     exp_details(args)
+
+    # If resuming and user didn't provide log_dir, infer it from resume_ckpt_path
+    if getattr(args, 'resume_ckpt_path', None) and args.log_dir is None:
+        ckpt_abs = os.path.abspath(args.resume_ckpt_path)
+        ckpt_dir = os.path.dirname(ckpt_abs)
+        # typical: <logdir>/stage1_ckpts/latest.pt
+        if os.path.basename(ckpt_dir) == 'stage1_ckpts':
+            args.log_dir = os.path.dirname(ckpt_dir)
+        else:
+            args.log_dir = ckpt_dir
+
     # 如果用户指定了自定义 logdir,使用它;否则自动生成
     if args.log_dir is not None:
         logdir = args.log_dir
@@ -943,28 +1152,78 @@ if __name__ == '__main__':
     np.random.seed(args.seed)
     random.seed(args.seed)
 
-    # load dataset and user groups
-    n_list = np.random.randint(max(2, args.ways - args.stdev), min(args.num_classes, args.ways + args.stdev + 1), args.num_users)# Minimum 2 classes; cannot exceed the total number of classes  List of the number of classes owned by each client: [,,,]
-    if args.dataset == 'mnist':
-        k_list = np.random.randint(args.shots - args.stdev + 1 , args.shots + args.stdev - 1, args.num_users)
-    elif args.dataset == 'cifar10':
-        k_list = np.random.randint(args.shots - args.stdev + 1 , args.shots + args.stdev + 1, args.num_users)
-    elif args.dataset =='cifar100':
-        k_list = np.random.randint(args.shots- args.stdev + 1, args.shots + args.stdev + 1, args.num_users)
-    elif args.dataset == 'femnist':
-        k_list = np.random.randint(args.shots - args.stdev + 1 , args.shots + args.stdev + 1, args.num_users)
-    elif args.dataset=='tinyimagenet':
-        k_list = np.random.randint(args.shots - args.stdev + 1 , args.shots + args.stdev + 1, args.num_users)
-    elif args.dataset == 'realwaste':
-        k_list = np.random.randint(args.shots - args.stdev + 1, args.shots + args.stdev + 1, args.num_users)
-    elif args.dataset == 'flowers':
-        k_list = np.random.randint(args.shots - args.stdev + 1, args.shots + args.stdev + 1, args.num_users)
-    elif args.dataset == 'defungi' or args.dataset == 'fashion':
-        k_list = np.random.randint(args.shots - args.stdev + 1, args.shots + args.stdev + 1, args.num_users)
-    elif args.dataset == 'imagenet':  # The number of samples in the category with the fewest samples in the training set is 732, and the number of samples in the category with the fewest samples in the test set is 50.
-        k_list = np.random.randint(args.shots - args.stdev + 1, args.shots + args.stdev + 1, args.num_users)
+    # ===================== Resume Stage-1 (optional) =====================
+    resume_payload = None
+    if getattr(args, 'resume_ckpt_path', None):
+        try:
+            resume_payload = load_checkpoint(args.resume_ckpt_path, map_location='cpu')
+            print(f"Loaded resume checkpoint: {args.resume_ckpt_path}")
+        except Exception as e:
+            print(f"Failed to load resume checkpoint: {args.resume_ckpt_path} ({e})")
+            resume_payload = None
 
-    train_dataset, test_dataset, user_groups, user_groups_lt, classes_list, classes_list_gt = get_dataset(args, n_list, k_list)
+    # ===================== Dataset split (persist / reuse) =====================
+    if getattr(args, 'split_path', None) is None:
+        args.split_path = os.path.join(logdir, 'split.pkl')
+
+    loaded_split = None
+    if getattr(args, 'reuse_split', 1) == 1 and os.path.exists(args.split_path):
+        loaded_split = load_split(args.split_path)
+
+    # load dataset and user groups
+    if loaded_split is None:
+        n_list = np.random.randint(max(2, args.ways - args.stdev), min(args.num_classes, args.ways + args.stdev + 1), args.num_users)# Minimum 2 classes; cannot exceed the total number of classes
+        if args.dataset == 'mnist':
+            k_list = np.random.randint(args.shots - args.stdev + 1 , args.shots + args.stdev - 1, args.num_users)
+        elif args.dataset == 'cifar10':
+            k_list = np.random.randint(args.shots - args.stdev + 1 , args.shots + args.stdev + 1, args.num_users)
+        elif args.dataset =='cifar100':
+            k_list = np.random.randint(args.shots- args.stdev + 1, args.shots + args.stdev + 1, args.num_users)
+        elif args.dataset == 'femnist':
+            k_list = np.random.randint(args.shots - args.stdev + 1 , args.shots + args.stdev + 1, args.num_users)
+        elif args.dataset=='tinyimagenet':
+            k_list = np.random.randint(args.shots - args.stdev + 1 , args.shots + args.stdev + 1, args.num_users)
+        elif args.dataset == 'realwaste':
+            k_list = np.random.randint(args.shots - args.stdev + 1, args.shots + args.stdev + 1, args.num_users)
+        elif args.dataset == 'flowers':
+            k_list = np.random.randint(args.shots - args.stdev + 1, args.shots + args.stdev + 1, args.num_users)
+        elif args.dataset == 'defungi' or args.dataset == 'fashion':
+            k_list = np.random.randint(args.shots - args.stdev + 1, args.shots + args.stdev + 1, args.num_users)
+        elif args.dataset == 'imagenet':
+            k_list = np.random.randint(args.shots - args.stdev + 1, args.shots + args.stdev + 1, args.num_users)
+
+        train_dataset, test_dataset, user_groups, user_groups_lt, classes_list, classes_list_gt = get_dataset(args, n_list, k_list)
+        split_to_save = {
+            'meta': {
+                'dataset': args.dataset,
+                'num_users': args.num_users,
+                'num_classes': args.num_classes,
+                'ways': args.ways,
+                'shots': args.shots,
+                'train_shots_max': args.train_shots_max,
+                'test_shots': args.test_shots,
+                'stdev': args.stdev,
+                'seed': args.seed,
+            },
+            'n_list': n_list,
+            'k_list': k_list,
+            'user_groups': user_groups,
+            'user_groups_lt': user_groups_lt,
+            'classes_list': classes_list,
+            'classes_list_gt': classes_list_gt,
+        }
+        save_split(args.split_path, split_to_save)
+        print(f"Saved dataset split to: {args.split_path}")
+    else:
+        # Load datasets as usual, but override split with persisted split.
+        n_list = loaded_split['n_list']
+        k_list = loaded_split['k_list']
+        train_dataset, test_dataset, _, _, _, _ = get_dataset(args, n_list, k_list)
+        user_groups = loaded_split['user_groups']
+        user_groups_lt = loaded_split['user_groups_lt']
+        classes_list = loaded_split['classes_list']
+        classes_list_gt = loaded_split.get('classes_list_gt', classes_list)
+        print(f"Reused dataset split from: {args.split_path}")
     # user_groups: dictionary where
     #   - key = client ID
     #   - value = ndarray of selected sample IDs for the client’s chosen classes (class IDs sorted in ascending order)
@@ -1014,6 +1273,52 @@ if __name__ == '__main__':
         local_model.to(args.device)
         local_model.train()
         local_model_list.append(local_model)
+
+    # Restore model weights & training state if resuming
+    if resume_payload is not None:
+        try:
+            st = resume_payload.get('state', {})
+            local_sd = st.get('local_models_full_state_dicts', None)
+            if isinstance(local_sd, dict):
+                for cid, m in enumerate(local_model_list):
+                    if cid in local_sd:
+                        m.load_state_dict(local_sd[cid], strict=True)
+                print("Restored local model weights from checkpoint.")
+            # Restore RNG for more reproducible continuation
+            rng_state = resume_payload.get('rng_state', None)
+            if rng_state is not None:
+                set_rng_state(rng_state)
+                print("Restored RNG state from checkpoint.")
+
+            # Inject resume state into args for FedMPS
+            def _move_tensors_to_device(obj, device):
+                """Recursively move tensors inside nested dict/list/tuple structures to the given device."""
+                if torch.is_tensor(obj):
+                    return obj.to(device)
+                if isinstance(obj, dict):
+                    return {k: _move_tensors_to_device(v, device) for k, v in obj.items()}
+                if isinstance(obj, list):
+                    return [_move_tensors_to_device(v, device) for v in obj]
+                if isinstance(obj, tuple):
+                    return tuple(_move_tensors_to_device(v, device) for v in obj)
+                return obj
+
+            best_state = st.get('best', {}) if isinstance(st, dict) else {}
+            args.start_round = int(resume_payload.get('meta', {}).get('round', 0)) + 1
+            args.resume_state = {
+                # IMPORTANT: checkpoint is loaded with map_location='cpu', so move cached tensors back to args.device
+                'global_high_protos': _move_tensors_to_device(st.get('global_high_protos', {}), args.device),
+                'global_low_protos': _move_tensors_to_device(st.get('global_low_protos', {}), args.device),
+                'global_logits': _move_tensors_to_device(st.get('global_logits', {}), args.device),
+                'best_acc': best_state.get('best_acc', -float('inf')),
+                'best_std': best_state.get('best_std', -float('inf')),
+                'best_round': best_state.get('best_round', 0),
+                'best_acc_w': best_state.get('best_acc_w', -float('inf')),
+                'best_std_w': best_state.get('best_std_w', -float('inf')),
+                'best_round_w': best_state.get('best_round_w', 0),
+            }
+        except Exception as e:
+            print(f"Warning: resume restoration failed, continuing without resume state. ({e})")
 
 
     if args.alg=='fedavg':

@@ -704,6 +704,9 @@ class LocalUpdate(object):
                         class_logits = global_logits[l.item()]  # 获取该类别的全局 logits
                         global_logits_tensor.append(class_logits)
                     global_logits_tensor = torch.stack(global_logits_tensor)
+                    # Resume/serialization safety: ensure global logits are on the same device/dtype as local logits
+                    if torch.is_tensor(global_logits_tensor):
+                        global_logits_tensor = global_logits_tensor.to(device=logits.device, dtype=logits.dtype)
                     # 使用 logits 计算 softmax（而非 probs）
                     loss_soft = soft_loss(F.log_softmax(logits / T, dim=1), F.softmax(global_logits_tensor / T, dim=1))
 
