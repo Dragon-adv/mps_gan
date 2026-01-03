@@ -82,7 +82,7 @@ def mnist_noniid(args, dataset, num_users, n_list, k_list):
     for i in range(num_users):
         n = n_list[i]
         k = k_list[i]
-        k_len = args.train_shots_max
+        k_len = getattr(args, "train_shots_max", 110)
         classes = random.sample(range(0,args.num_classes), n)
         classes = np.sort(classes)
         print("user {:d}: {:d}-way {:d}-shot".format(i + 1, n, k))
@@ -256,7 +256,7 @@ def femnist_noniid(args, num_users, n_list, k_list):
     for i in range(num_users):
         n = n_list[i]
         k = k_list[i]
-        k_len = args.train_shots_max
+        k_len = getattr(args, "train_shots_max", 110)
         classes = random.sample(range(0, args.num_classes), n)
         classes = np.sort(classes)
         print("user {:d}: {:d}-way {:d}-shot".format(i + 1, n, k))
@@ -409,7 +409,7 @@ def cifar10_noniid(args, dataset, num_users, n_list, k_list):
 
     classes_list = []
     classes_list_gt = []
-    k_len = args.train_shots_max
+    k_len = getattr(args, "train_shots_max", 110)
     for i in range(num_users):
         n = n_list[i]
         k = k_list[i]
@@ -599,7 +599,7 @@ def eurosat_noniid(args, dataset, y,num_users, n_list, k_list):
     print('min_class_num:{}'.format(label_num[min_label]))
     classes_list = []
     classes_list_gt = []
-    k_len = args.train_shots_max
+    k_len = getattr(args, "train_shots_max", 110)
     for i in range(num_users):
         n = n_list[i]
         k = k_list[i]
@@ -688,7 +688,7 @@ def tiny_noniid(args, dataset, num_users, n_list, k_list):
 
     classes_list = []
     classes_list_gt = []
-    k_len=args.train_shots_max
+    k_len = getattr(args, "train_shots_max", 110)
     for i in range(num_users):
         n = n_list[i]
         k = k_list[i]
@@ -787,7 +787,7 @@ def fashion_noniid(args, dataset, num_users, n_list, k_list):
     for i in range(num_users):
         n = n_list[i]
         k = k_list[i]
-        k_len = args.train_shots_max
+        k_len = getattr(args, "train_shots_max", 110)
         classes = random.sample(range(0,args.num_classes), n)
         classes = np.sort(classes)
         print("user {:d}: {:d}-way {:d}-shot".format(i + 1, n, k))

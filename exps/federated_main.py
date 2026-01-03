@@ -1345,7 +1345,7 @@ if __name__ == '__main__':
             else:
                 raise KeyError(f'Checkpoint local_models_full_state_dicts missing client id={cid}')
 
-        # Build low-level RFF model (d inferred from a dummy forward)
+        # Build RFF models (feature dims inferred from a dummy forward)
         dummy_model = copy.deepcopy(local_model_list[0]).to(args.device).eval()
         if args.dataset == 'mnist' or args.dataset == 'femnist' or args.dataset == 'fashion':
             dummy_input = torch.randn(1, 1, 28, 28).to(args.device)
@@ -1358,6 +1358,7 @@ if __name__ == '__main__':
         with torch.no_grad():
             dummy_output = dummy_model(dummy_input)
             if isinstance(dummy_output, tuple) and len(dummy_output) >= 4:
+                high_feature_dim = dummy_output[2].shape[1]
                 low_feature_dim = dummy_output[3].shape[1]
             else:
                 raise ValueError('Dummy model output format unexpected for Stage-2.')
@@ -1373,6 +1374,13 @@ if __name__ == '__main__':
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(args.rf_seed)
 
+        rf_model_high = RFF(
+            d=high_feature_dim,
+            D=args.rf_dim_high,
+            gamma=args.rbf_gamma_high,
+            device=args.device,
+            rf_type=args.rf_type
+        )
         rf_model_low = RFF(
             d=low_feature_dim,
             D=args.rf_dim_low,
@@ -1380,37 +1388,54 @@ if __name__ == '__main__':
             device=args.device,
             rf_type=args.rf_type
         )
-        rf_models = {'low': rf_model_low}
+        rf_models = {'high': rf_model_high, 'low': rf_model_low}
 
         random.setstate(backup_rng_state['python'])
         np.random.set_state(backup_rng_state['numpy'])
         torch.set_rng_state(backup_rng_state['torch'])
 
-        # Collect local statistics (low-only) and aggregate
+        # Collect local statistics (high+low) and aggregate
         client_responses = []
         for idx in range(args.num_users):
             local_upd = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[idx])
-            if hasattr(local_upd, 'get_local_statistics_streaming'):
-                local_stats = local_upd.get_local_statistics_streaming(
-                    model=copy.deepcopy(local_model_list[idx]),
-                    rf_models=rf_models,
-                    args=args,
-                    stats_level='low'
-                )
-            else:
-                local_stats = local_upd.get_local_statistics(
-                    model=copy.deepcopy(local_model_list[idx]),
-                    rf_models=rf_models,
-                    args=args,
-                    stats_level='low'
-                )
+            local_stats = local_upd.get_local_statistics(
+                model=copy.deepcopy(local_model_list[idx]),
+                rf_models=rf_models,
+                args=args,
+                stats_level='both',
+                high_stats_mode='raw'
+            )
             client_responses.append(local_stats)
 
         global_stats = aggregate_global_statistics(
             client_responses=client_responses,
             class_num=args.num_classes,
-            stats_level='low'
+            stats_level='both'
         )
+
+        # Post-process high-level class means to mean-then-norm (mean_then_norm) while preserving raw mean/cov
+        if isinstance(global_stats, dict) and 'high' in global_stats and isinstance(global_stats.get('high', None), dict):
+            try:
+                import torch.nn.functional as F
+                high_means_raw = global_stats['high'].get('class_means', None)
+                high_covs_raw = global_stats['high'].get('class_covs', None)
+                if isinstance(high_means_raw, list):
+                    global_stats['high']['class_means_raw'] = [m.detach().clone() for m in high_means_raw]
+                    if isinstance(high_covs_raw, list):
+                        global_stats['high']['class_covs_raw'] = [c.detach().clone() for c in high_covs_raw]
+                    high_means_mtn = []
+                    for m in high_means_raw:
+                        if m is None:
+                            high_means_mtn.append(m)
+                            continue
+                        if torch.allclose(m, torch.zeros_like(m)):
+                            high_means_mtn.append(m)
+                        else:
+                            high_means_mtn.append(F.normalize(m.unsqueeze(0), dim=1).squeeze(0))
+                    global_stats['high']['class_means'] = high_means_mtn
+            except Exception:
+                # Do not fail Stage-2 if post-processing fails; Stage-3 can still rely on raw means if needed.
+                pass
 
         stage2_meta = {
             'stage': 2,
@@ -1423,18 +1448,22 @@ if __name__ == '__main__':
             'split_path': getattr(args, 'split_path', None),
             'stage1_ckpt_path': args.stage1_ckpt_path,
             'stage1_meta': ckpt_meta,
+            'high_feature_dim': high_feature_dim,
             'low_feature_dim': low_feature_dim,
+            'rf_dim_high': args.rf_dim_high,
+            'rbf_gamma_high': args.rbf_gamma_high,
             'rf_dim_low': args.rf_dim_low,
             'rbf_gamma_low': args.rbf_gamma_low,
             'rf_seed': args.rf_seed,
             'rf_type': args.rf_type,
+            'high_mean_mode': 'mean_then_norm',
         }
         out_payload = {
             'meta': stage2_meta,
             'args': vars(args),
             'state': {
                 'global_stats': global_stats,
-                'rf_models_state': {'low': rf_model_low.state_dict()},
+                'rf_models_state': {'high': rf_model_high.state_dict(), 'low': rf_model_low.state_dict()},
             },
         }
 

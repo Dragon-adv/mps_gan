@@ -13,14 +13,22 @@ from lib.sampling import cifar_iid, cifar100_noniid, cifar10_noniid, cifar100_no
 from lib.sampling import eurosat_noniid,eurosat_noniid_lt
 from lib.sampling import tiny_noniid,tiny_noniid_lt
 from lib.sampling import fashion_noniid,fashion_noniid_lt
-import femnist
 import numpy as np
 import os
-import realwaste
 import random
 from torch.utils.data import Subset
 import seaborn as sns
 import matplotlib.pyplot as plt
+
+# Local datasets live inside the `lib` package. When importing `lib.utils` from the project root
+# (e.g., running `python exps/...`), absolute `import femnist` would fail on Windows.
+# Keep a small fallback so running this file directly from within `lib/` still works.
+try:
+    from . import femnist
+    from . import realwaste
+except ImportError:  # pragma: no cover
+    import femnist  # type: ignore
+    import realwaste  # type: ignore
 
 trans_cifar10_train = transforms.Compose([transforms.RandomCrop(32, padding=4),
                                           transforms.RandomHorizontalFlip(),
@@ -47,6 +55,13 @@ def get_dataset(args, n_list, k_list):
     the keys are the user index and the values are the corresponding data for
     each of those users.
     """
+    # Some entry scripts (e.g., Stage-3 utilities) may construct a minimal Namespace
+    # that lacks few-shot related fields. Provide safe defaults consistent with
+    # `lib/options.py` to avoid AttributeError in `lib/sampling.py`.
+    if not hasattr(args, "train_shots_max"):
+        args.train_shots_max = 110
+    if not hasattr(args, "test_shots"):
+        args.test_shots = 15
     data_dir = args.data_dir + args.dataset
     if args.dataset == 'mnist':
         apply_transform = transforms.Compose([

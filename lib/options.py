@@ -178,6 +178,18 @@ def args_parser():
     parser.add_argument('--stage3_out_dir', type=str, default=None,
                         help='[Stage-3] Output directory to save generator artifacts. If None, defaults to <log_dir>/stage3_gen')
 
+    # ===================== Stage-3 (alt) minimal lowgen training =====================
+    # Used by exps/run_stage3_lowgen_minloop.py (kept here for a unified arg surface).
+    parser.add_argument('--stage3_minloop_out_dir', type=str, default=None,
+                        help='[Stage-3-minloop] Output directory for lowgen minimal loop. '
+                             'If None, defaults to <ckpt.meta.logdir>/stage3_lowgen_minloop')
+    parser.add_argument('--lambda_high_mean', type=float, default=1.0,
+                        help='[Stage-3-minloop] Weight for high-level mean-then-norm matching loss')
+    parser.add_argument('--alpha_teacher', type=float, default=1.0,
+                        help='[Stage-3-minloop] Weight for teacher CE loss (ensemble logits)')
+    parser.add_argument('--eta_div', type=float, default=0.01,
+                        help='[Stage-3-minloop] Weight for diversity regularizer')
+
     # Generator architecture
     parser.add_argument('--gen_noise_dim', type=int, default=64, help='[Stage-3] Generator noise dimension')
     parser.add_argument('--gen_y_emb_dim', type=int, default=32, help='[Stage-3] Generator label embedding dimension')

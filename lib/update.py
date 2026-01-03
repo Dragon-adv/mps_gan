@@ -956,7 +956,7 @@ class LocalUpdate(object):
         loss = -mean_log_prob_pos.mean()
         return loss
 
-    def get_local_statistics(self, model, rf_models, args, stats_level='high'):
+    def get_local_statistics(self, model, rf_models, args, stats_level='high', high_stats_mode: str = 'per_sample_norm'):
         """
         计算本地统计量，用于 SFD 算法的统计量聚合阶段。
 
@@ -974,6 +974,9 @@ class LocalUpdate(object):
                         - 'high': 仅计算 high-level 统计量（默认）
                         - 'low': 仅计算 low-level 统计量
                         - 'both': 计算 high-level 和 low-level 统计量
+            high_stats_mode: high-level 统计口径（仅影响 high-level 的 z 用于 class_means/class_outers 统计）：
+                        - 'per_sample_norm': 对每个样本的 high feature 先做 F.normalize，再统计（保持原有默认行为）
+                        - 'raw': 使用 high_level_features_raw 直接统计（不做 per-sample normalize）
 
         返回:
             dict: 包含以下结构的字典
@@ -984,6 +987,7 @@ class LocalUpdate(object):
                 - 'low': 包含 low-level 统计量的字典（如果 stats_level 为 'low' 或 'both'，结构同上）
                 - 'sample_per_class': 每个类别的样本数（两个层级共享）
         """
+        import torch.nn.functional as F
         # 确定需要计算的层级
         compute_high = (stats_level == 'high' or stats_level == 'both')
         compute_low = (stats_level == 'low' or stats_level == 'both')
@@ -1039,14 +1043,17 @@ class LocalUpdate(object):
                 if compute_high:
                     high_features_norm = F.normalize(high_features, dim=1)
                     rf_high = rf_models['high'](high_features_norm)
-                    zs_high.append(high_features_norm.cpu())  # 存储归一化版本用于统计量计算
-                    rfs_high.append(rf_high.cpu())
+                    if str(high_stats_mode).lower() == 'raw':
+                        zs_high.append(high_features.detach().cpu())  # raw high features for mean/outer stats
+                    else:
+                        zs_high.append(high_features_norm.detach().cpu())  # per-sample normalized stats (default)
+                    rfs_high.append(rf_high.detach().cpu())
                 
                 if compute_low:
                     low_features_norm = F.normalize(low_features, dim=1)
                     rf_low = rf_models['low'](low_features_norm)
-                    zs_low.append(low_features_norm.cpu())  # 存储归一化版本用于统计量计算
-                    rfs_low.append(rf_low.cpu())
+                    zs_low.append(low_features_norm.detach().cpu())  # 存储归一化版本用于统计量计算
+                    rfs_low.append(rf_low.detach().cpu())
 
         # 将列表拼接成大张量
         y = torch.cat(ys, dim=0)  # shape: (total_samples,)
