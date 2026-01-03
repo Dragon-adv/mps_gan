@@ -178,6 +178,31 @@ def args_parser():
     parser.add_argument('--stage3_out_dir', type=str, default=None,
                         help='[Stage-3] Output directory to save generator artifacts. If None, defaults to <log_dir>/stage3_gen')
 
+    # ===================== Stage-4 feature finetune (client-side) =====================
+    # Stage-4 loads Stage-1 ckpt + Stage-2 stats + Stage-3 generator to finetune (fc0+fc1+fc2) using mixed real/synthetic low features.
+    parser.add_argument('--stage4_stage1_ckpt_path', type=str, default=None,
+                        help='[Stage-4] Path to a Stage-1 checkpoint (e.g., <log_dir>/stage1_ckpts/best-wo.pt).')
+    parser.add_argument('--stage4_stage2_stats_path', type=str, default=None,
+                        help='[Stage-4] Path to Stage-2 global_stats.pt (e.g., <log_dir>/stage2_stats/global_stats.pt).')
+    parser.add_argument('--stage4_gen_path', type=str, default=None,
+                        help='[Stage-4] Path to Stage-3 generator.pt (e.g., <log_dir>/stage3_gen/generator.pt).')
+    parser.add_argument('--stage4_out_dir', type=str, default=None,
+                        help='[Stage-4] Output directory. If None, defaults to <log_dir>/stage4_finetune')
+    parser.add_argument('--stage4_steps', type=int, default=2000,
+                        help='[Stage-4] Training steps per client (default: 2000)')
+    parser.add_argument('--stage4_batch_size', type=int, default=128,
+                        help='[Stage-4] Batch size per client (default: 128)')
+    parser.add_argument('--stage4_lr', type=float, default=1e-4,
+                        help='[Stage-4] Learning rate for fc0+head finetune (default: 1e-4)')
+    parser.add_argument('--stage4_weight_decay', type=float, default=0.0,
+                        help='[Stage-4] Weight decay (default: 0.0)')
+    parser.add_argument('--stage4_syn_ratio', type=float, default=0.2,
+                        help='[Stage-4] Synthetic ratio within each step (0..1, default: 0.2)')
+    parser.add_argument('--stage4_seed', type=int, default=1234,
+                        help='[Stage-4] Random seed (default: 1234)')
+    parser.add_argument('--stage4_gpu', type=int, default=0,
+                        help='[Stage-4] GPU index (default: 0)')
+
     # ===================== Stage-3 (alt) minimal lowgen training =====================
     # Used by exps/run_stage3_lowgen_minloop.py (kept here for a unified arg surface).
     parser.add_argument('--stage3_minloop_out_dir', type=str, default=None,

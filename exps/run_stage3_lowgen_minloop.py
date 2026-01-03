@@ -161,14 +161,18 @@ def _teacher_forward_from_low(
     x_low: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Given low-level feature vector x_low (B,400), compute:
-      - h_raw: ReLU(fc0(x_low))              (B,120)
-      - logits: fc2(ReLU(fc1(norm(h_raw))))  (B,num_classes)
+    Given low-level feature vector x_low (raw, unnormalized), compute:
+      - h_raw: ReLU(fc0(x_low))               (B,120)
+      - logits: fc2(ReLU(fc1(norm(h_raw))))   (B,num_classes)
+
+    NOTE:
+      This must match CNNCifar.forward() semantics when feeding REAL images:
+        low_level_features_raw is the flatten output of (conv+pool) blocks (no normalize),
+        then high path applies fc0->normalize->fc1->fc2.
+      Therefore, x_low here should be the same "raw low feature" (not F.normalize(x_low)).
     """
-    h_raw = F.relu(teacher.fc0(x_low))
-    h_norm = F.normalize(h_raw, dim=1)
-    feat = F.relu(teacher.fc1(h_norm))
-    logits = teacher.fc2(feat)
+    # Delegate to the canonical model API to avoid any normalization/activation drift.
+    logits, _log_probs, h_raw, _proj = teacher.forward_from_low(x_low)
     return h_raw, logits
 
 

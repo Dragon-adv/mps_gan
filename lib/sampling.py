@@ -87,7 +87,7 @@ def mnist_noniid(args, dataset, num_users, n_list, k_list):
         classes = np.sort(classes)
         print("user {:d}: {:d}-way {:d}-shot".format(i + 1, n, k))
         print("classes:", classes)
-        user_data = np.array([])
+        user_data = np.array([], dtype=np.int64)
         for each_class in classes:
             # begin = i*10 + label_begin[each_class.item()]
             begin = i * k_len + label_begin[each_class.item()]
@@ -127,7 +127,7 @@ def mnist_noniid_lt(args, test_dataset, num_users, n_list, k_list, classes_list)
         k = 40 # test samples for each class
         classes = classes_list[i]
         print("local test classes:", classes)
-        user_data = np.array([])
+        user_data = np.array([], dtype=np.int64)
         for each_class in classes:
             begin = i*40 + label_begin[each_class.item()]
             user_data = np.concatenate((user_data, idxs[begin : begin+k]),axis=0)
@@ -149,7 +149,7 @@ def mnist_noniid_unequal(dataset, num_users):
     # 60,000 training imgs --> 50 imgs/shard X 1200 shards
     num_shards, num_imgs = 1200, 50
     idx_shard = [i for i in range(num_shards)]
-    dict_users = {i: np.array([]) for i in range(num_users)}
+    dict_users = {i: np.array([], dtype=np.int64) for i in range(num_users)}
     idxs = np.arange(num_shards*num_imgs)
     labels = dataset.train_labels.numpy()
 
@@ -262,7 +262,7 @@ def femnist_noniid(args, num_users, n_list, k_list):
         print("user {:d}: {:d}-way {:d}-shot".format(i + 1, n, k))
         print("classes:", classes)
         print("classes_gt:", classes)
-        user_data = np.array([])
+        user_data = np.array([], dtype=np.int64)
         for class_idx in classes:
             begin = class_idx * k_len * num_users + i * k_len
             user_data = np.concatenate((user_data, np.arange(begin, begin + k)),axis=0)
@@ -286,7 +286,7 @@ def femnist_noniid_lt(args, num_users, classes_list):
     for i in range(num_users):
         k = args.test_shots
         classes = classes_list[i]
-        user_data = np.array([])
+        user_data = np.array([], dtype=np.int64)
         for class_idx in classes:
             begin = class_idx * k * num_users + i * k
             user_data = np.concatenate((user_data, np.arange(begin, begin + k)), axis=0)
@@ -307,7 +307,7 @@ def femnist_noniid_unequal(dataset, num_users):
     # 60,000 training imgs --> 50 imgs/shard X 1200 shards
     num_shards, num_imgs = 1200, 50
     idx_shard = [i for i in range(num_shards)]
-    dict_users = {i: np.array([]) for i in range(num_users)}
+    dict_users = {i: np.array([], dtype=np.int64) for i in range(num_users)}
     idxs = np.arange(num_shards*num_imgs)
     labels = dataset.train_labels.numpy()
 
@@ -417,7 +417,7 @@ def cifar10_noniid(args, dataset, num_users, n_list, k_list):
         classes = np.sort(classes)
         print("user {:d}: {:d}-way {:d}-shot".format(i + 1, n, k))
         print("classes:", classes)
-        user_data = np.array([])# sample id list
+        user_data = np.array([], dtype=np.int64)  # sample id list
         for each_class in classes:
             begin = i * k_len + label_begin[each_class.item()]
             user_data = np.concatenate((user_data, idxs[begin: begin + k]), axis=0)
@@ -455,7 +455,7 @@ def cifar10_noniid_lt(args, test_dataset, num_users, n_list, k_list, classes_lis
         k = args.test_shots
         classes = classes_list[i]
         print("local test classes:", classes)
-        user_data = np.array([])
+        user_data = np.array([], dtype=np.int64)
         for each_class in classes:
             begin = i * k + label_begin[each_class.item()]
             user_data = np.concatenate((user_data, idxs[begin : begin+k]),axis=0)
@@ -517,7 +517,7 @@ def cifar100_noniid(args, dataset, num_users, n_list, k_list):
         classes = np.sort(classes)
         print("user {:d}: {:d}-way {:d}-shot".format(i + 1, n, k))
         print("classes:", classes)
-        user_data = np.array([])
+        user_data = np.array([], dtype=np.int64)
         for each_class in classes:
             begin = label_begin[each_class.item()] + i*5
             user_data = np.concatenate((user_data, idxs[begin : begin+k]),axis=0)
@@ -557,7 +557,7 @@ def cifar100_noniid_lt(test_dataset, num_users, classes_list):
         k = 5
         classes = classes_list[i]
         print("local test classes:", classes)
-        user_data = np.array([])
+        user_data = np.array([], dtype=np.int64)
         for each_class in classes:
             # begin = i*5 + label_begin[each_class.item()]
             begin = random.randint(0,90) + label_begin[each_class.item()]
@@ -607,7 +607,7 @@ def eurosat_noniid(args, dataset, y,num_users, n_list, k_list):
         classes = np.sort(classes)
         print("user {:d}: {:d}-way {:d}-shot".format(i + 1, n, k))
         print("classes:", classes)
-        user_data = np.array([])
+        user_data = np.array([], dtype=np.int64)
         for each_class in classes:
             begin = i * k_len + label_begin[each_class.item()]
             user_data = np.concatenate((user_data, idxs[begin: begin + k]), axis=0)
@@ -651,7 +651,7 @@ def eurosat_noniid_lt(args,test_dataset, y,num_users, classes_list):
         k = args.test_shots
         classes = classes_list[i]
         print("local test classes:", classes)
-        user_data = np.array([])
+        user_data = np.array([], dtype=np.int64)
         for each_class in classes:
             begin = i * k + label_begin[each_class.item()]
             user_data = np.concatenate((user_data, idxs[begin : begin+k]),axis=0)
@@ -696,7 +696,7 @@ def tiny_noniid(args, dataset, num_users, n_list, k_list):
         classes = np.sort(classes)
         print("user {:d}: {:d}-way {:d}-shot".format(i + 1, n, k))
         print("classes:", classes)
-        user_data = np.array([])
+        user_data = np.array([], dtype=np.int64)
         for each_class in classes:
             begin = label_begin[each_class.item()] + i*k_len
             user_data = np.concatenate((user_data, idxs[begin : begin+k]),axis=0)
@@ -742,7 +742,7 @@ def tiny_noniid_lt(args,test_dataset, num_users, classes_list):
         k = args.test_shots
         classes = classes_list[i]
         print("local test classes:", classes)
-        user_data = np.array([])
+        user_data = np.array([], dtype=np.int64)
         for each_class in classes:
             begin = i * k + label_begin[each_class.item()]
             user_data = np.concatenate((user_data, idxs[begin: begin + k]), axis=0)
@@ -792,7 +792,7 @@ def fashion_noniid(args, dataset, num_users, n_list, k_list):
         classes = np.sort(classes)
         print("user {:d}: {:d}-way {:d}-shot".format(i + 1, n, k))
         print("classes:", classes)
-        user_data = np.array([])
+        user_data = np.array([], dtype=np.int64)
         for each_class in classes:
             # begin = i*10 + label_begin[each_class.item()]
             begin = i * k_len + label_begin[each_class.item()]
@@ -837,7 +837,7 @@ def fashion_noniid_lt(args, test_dataset, num_users, n_list, k_list, classes_lis
         k = args.test_shots
         classes = classes_list[i]
         print("local test classes:", classes)
-        user_data = np.array([])
+        user_data = np.array([], dtype=np.int64)
         for each_class in classes:
             begin = i*k + label_begin[each_class.item()]
             user_data = np.concatenate((user_data, idxs[begin : begin+k]),axis=0)

@@ -143,6 +143,34 @@ class CNNCifar(nn.Module):
             'classifier_head': head,
         }
 
+    def forward_from_low(self, x_low):
+        """
+        Forward from low-level feature vector (raw, unnormalized).
+
+        This is the canonical "stage-4" / feature-augmentation path:
+          x_low (B, 16*5*5) -> fc0 -> normalize -> fc1 -> fc2 (+ projector)
+
+        Args:
+            x_low: Tensor of shape (B, 16*5*5) for CIFAR10/CNNCifar.
+
+        Returns:
+            logits, log_probs, high_level_features_raw, projected_features
+        """
+        # High-level encoder
+        high_level_features_raw = F.relu(self.fc0(x_low))
+        high_level_features = F.normalize(high_level_features_raw, dim=1)
+
+        # Classifier head
+        feat_for_classifier = F.relu(self.fc1(high_level_features))
+        logits = self.fc2(feat_for_classifier)
+        log_probs = F.log_softmax(logits, dim=1)
+
+        # Projector (contrastive head)
+        proj_output = self.projector(high_level_features)
+        projected_features = F.normalize(proj_output, dim=1)
+
+        return logits, log_probs, high_level_features_raw, projected_features
+
     def forward(self, x):
         # 1. 低级特征阶段
         feat_low_raw = self.pool(F.relu(self.conv1(x)))
