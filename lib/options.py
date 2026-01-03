@@ -170,6 +170,35 @@ def args_parser():
     parser.add_argument('--stage2_out_dir', type=str, default=None,
                         help='[Stage-2] Output directory to save stage-2 aggregated statistics. '
                              'If None, defaults to <ckpt.meta.logdir>/stage2_stats (or <log_dir>/stage2_stats).')
+    
+    # ===================== Stage-3 generator training =====================
+    # Stage-3 trains a stats-conditioned generator for low-level features using Stage-2 global_stats.pt.
+    parser.add_argument('--stage2_stats_path', type=str, default=None,
+                        help='[Stage-3] Path to Stage-2 global_stats.pt (e.g., <log_dir>/stage2_stats/global_stats.pt).')
+    parser.add_argument('--stage3_out_dir', type=str, default=None,
+                        help='[Stage-3] Output directory to save generator artifacts. If None, defaults to <log_dir>/stage3_gen')
+
+    # Generator architecture
+    parser.add_argument('--gen_noise_dim', type=int, default=64, help='[Stage-3] Generator noise dimension')
+    parser.add_argument('--gen_y_emb_dim', type=int, default=32, help='[Stage-3] Generator label embedding dimension')
+    parser.add_argument('--gen_stat_emb_dim', type=int, default=128, help='[Stage-3] Generator stats embedding dimension')
+    parser.add_argument('--gen_hidden_dim', type=int, default=256, help='[Stage-3] Generator hidden dimension')
+    parser.add_argument('--gen_n_hidden_layers', type=int, default=2, help='[Stage-3] Number of hidden layers in generator MLP')
+    parser.add_argument('--gen_relu_output', type=int, default=1, help='[Stage-3] Use ReLU on generator output (0/1)')
+    parser.add_argument('--gen_use_cov_diag', type=int, default=1, help='[Stage-3] Condition on diag(cov) in addition to mean (0/1)')
+
+    # Generator training
+    parser.add_argument('--gen_steps', type=int, default=2000, help='[Stage-3] Training steps for generator')
+    parser.add_argument('--gen_batch_size', type=int, default=256, help='[Stage-3] Batch size for generator training')
+    parser.add_argument('--gen_lr', type=float, default=1e-3, help='[Stage-3] Learning rate for generator training')
+    parser.add_argument('--gen_seed', type=int, default=1234, help='[Stage-3] Random seed for generator training')
+
+    # Loss weights
+    parser.add_argument('--gen_w_mean', type=float, default=1.0, help='[Stage-3] Weight for mean matching loss')
+    parser.add_argument('--gen_w_var', type=float, default=0.1, help='[Stage-3] Weight for diag-variance matching loss')
+    parser.add_argument('--gen_w_rff', type=float, default=1.0, help='[Stage-3] Weight for RFF mean matching loss')
+    parser.add_argument('--gen_w_div', type=float, default=0.01, help='[Stage-3] Weight for diversity regularizer')
+    parser.add_argument('--gen_w_arr', type=float, default=0.0, help='[Stage-3] Weight for non-negativity range regularizer (ARR)')
     parser.add_argument('--stage1_ckpt_dir', type=str, default=None,
                         help='Directory to store Stage-1 checkpoints. If None, defaults to <log_dir>/stage1_ckpts')
     parser.add_argument('--save_latest_ckpt', type=int, default=1,

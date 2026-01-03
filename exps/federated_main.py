@@ -13,6 +13,8 @@ import pickle
 import random
 import numpy as np
 import math
+import json
+import torch
 
 # 将项目根目录添加到 sys.path
 import os
@@ -40,6 +42,12 @@ from lib.checkpoint import (
 )
 from lib.sfd_utils import RFF, aggregate_global_statistics
 from lib.safs import MeanCovAligner, feature_synthesis, make_syn_nums
+from lib.feature_generator import (
+    DiversityLoss,
+    StatsConditionedFeatureGenerator,
+    gather_by_label,
+    stack_low_global_stats,
+)
 
 model_urls = {
     'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
@@ -512,6 +520,18 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         global_high_protos = resume_state.get('global_high_protos', global_high_protos) or {}
         global_low_protos = resume_state.get('global_low_protos', global_low_protos) or {}
         global_logits = resume_state.get('global_logits', global_logits) or {}
+        # Restore global classifier head weights if present (for consistent global_logits trajectory)
+        global_model_sd = resume_state.get('global_model_state_dict', None)
+        if isinstance(global_model_sd, dict) and len(global_model_sd) > 0:
+            try:
+                global_model.load_state_dict(global_model_sd, strict=True)
+                print("Restored global_model (GlobalFedmps) weights from checkpoint.")
+                if logger is not None:
+                    logger.info("Restored global_model (GlobalFedmps) weights from checkpoint.")
+            except Exception as e:
+                print(f"Warning: failed to restore global_model weights from checkpoint ({e})")
+                if logger is not None:
+                    logger.info(f"Warning: failed to restore global_model weights from checkpoint ({e})")
         best_acc = resume_state.get('best_acc', best_acc)
         best_std = resume_state.get('best_std', best_std)
         best_round = resume_state.get('best_round', best_round)
@@ -931,6 +951,8 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
                 'state': {
                     'local_models_full_state_dicts': {cid: m.state_dict() for cid, m in enumerate(local_model_list)},
                     'components_state_dicts': comp_sd,
+                    # Global classifier head trained on (synthetic) prototypes to produce global_logits
+                    'global_model_state_dict': global_model.state_dict() if global_model is not None else None,
                     'global_high_protos': global_high_protos,
                     'global_low_protos': global_low_protos,
                     'global_logits': global_logits,
@@ -991,6 +1013,7 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
                     'state': {
                         'local_models_full_state_dicts': {cid: m.state_dict() for cid, m in enumerate(local_model_list)},
                         'components_state_dicts': comp_sd,
+                        'global_model_state_dict': global_model.state_dict() if global_model is not None else None,
                         'global_high_protos': global_high_protos,
                         'global_low_protos': global_low_protos,
                         'global_logits': global_logits,
@@ -1046,6 +1069,7 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
                     'state': {
                         'local_models_full_state_dicts': {cid: m.state_dict() for cid, m in enumerate(local_model_list)},
                         'components_state_dicts': comp_sd,
+                        'global_model_state_dict': global_model.state_dict() if global_model is not None else None,
                         'global_high_protos': global_high_protos,
                         'global_low_protos': global_low_protos,
                         'global_logits': global_logits,
@@ -1194,7 +1218,8 @@ if __name__ == '__main__':
     # start from scratch unless allow_restart=1. This prevents "latest.pt got overwritten by a new run".
     ckpt_dir_default = os.path.join(logdir, 'stage1_ckpts')
     latest_default = os.path.join(ckpt_dir_default, 'latest.pt')
-    if stage != 2 and getattr(args, 'resume_ckpt_path', None) is None:
+    # Only Stage-1 can overwrite latest.pt; Stage-2/3 are offline utilities.
+    if stage == 1 and getattr(args, 'resume_ckpt_path', None) is None:
         if os.path.exists(latest_default) and int(getattr(args, 'allow_restart', 0)) != 1:
             raise RuntimeError(
                 "检测到该 log_dir 下已存在 stage1_ckpts/latest.pt，但你没有指定 --resume_ckpt_path。\n"
@@ -1421,6 +1446,196 @@ if __name__ == '__main__':
         print(f"[Stage-2] Saved global statistics to: {stage2_out_dir}")
         raise SystemExit(0)
 
+    # Run Stage-3 early and exit (train generator)
+    if stage == 3:
+        logger.info("="*60)
+        logger.info("Stage-3: Train stats-conditioned low-level feature generator")
+        logger.info("="*60)
+
+        stage2_stats_path = getattr(args, "stage2_stats_path", None)
+        if stage2_stats_path is None:
+            stage2_stats_path = os.path.join(logdir, "stage2_stats", "global_stats.pt")
+        if not os.path.exists(stage2_stats_path):
+            raise FileNotFoundError(f"[Stage-3] stage2_stats_path not found: {stage2_stats_path}")
+
+        payload = torch.load(stage2_stats_path, map_location="cpu")
+        meta = payload.get("meta", {}) or {}
+        state = payload.get("state", {}) or {}
+        global_stats = state.get("global_stats", None)
+        if global_stats is None:
+            raise KeyError("[Stage-3] payload['state']['global_stats'] missing.")
+
+        # Resolve dims and RFF model
+        num_classes = int(meta.get("num_classes", getattr(args, "num_classes", 10)))
+        low_feature_dim = int(meta.get("low_feature_dim", None) or stack_low_global_stats(global_stats).mu.shape[1])
+        rf_dim_low = int(meta.get("rf_dim_low", getattr(args, "rf_dim_low", 3000)))
+        rbf_gamma_low = float(meta.get("rbf_gamma_low", getattr(args, "rbf_gamma_low", 0.01)))
+        rf_type = str(meta.get("rf_type", getattr(args, "rf_type", "orf")))
+
+        rf_model_low = RFF(d=low_feature_dim, D=rf_dim_low, gamma=rbf_gamma_low, device=args.device, rf_type=rf_type)
+        rf_state = (state.get("rf_models_state", {}) or {}).get("low", None)
+        if rf_state is not None:
+            rf_model_low.load_state_dict(rf_state, strict=True)
+        rf_model_low = rf_model_low.to(args.device).eval()
+
+        # Stack class-wise stats tensors
+        stats = stack_low_global_stats(global_stats)
+        stats = type(stats)(
+            mu=stats.mu.to(args.device),
+            cov_diag=stats.cov_diag.to(args.device),
+            rf_mean=stats.rf_mean.to(args.device),
+            sample_per_class=stats.sample_per_class.to(args.device),
+        )
+
+        qualified = torch.nonzero(stats.sample_per_class > 0, as_tuple=False).view(-1)
+        if qualified.numel() == 0:
+            raise ValueError("[Stage-3] No qualified classes with sample_per_class > 0 in global_stats.")
+
+        # Seeds (separate from Stage-1 seed)
+        gen_seed = int(getattr(args, "gen_seed", getattr(args, "seed", 1234)))
+        random.seed(gen_seed)
+        np.random.seed(gen_seed)
+        torch.manual_seed(gen_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(gen_seed)
+
+        gen = StatsConditionedFeatureGenerator(
+            num_classes=num_classes,
+            feature_dim=low_feature_dim,
+            noise_dim=int(getattr(args, "gen_noise_dim", 64)),
+            y_emb_dim=int(getattr(args, "gen_y_emb_dim", 32)),
+            stat_emb_dim=int(getattr(args, "gen_stat_emb_dim", 128)),
+            hidden_dim=int(getattr(args, "gen_hidden_dim", 256)),
+            n_hidden_layers=int(getattr(args, "gen_n_hidden_layers", 2)),
+            relu_output=int(getattr(args, "gen_relu_output", 1)) == 1,
+            use_cov_diag=int(getattr(args, "gen_use_cov_diag", 1)) == 1,
+        ).to(args.device)
+
+        diversity_loss_fn = DiversityLoss(metric="l1").to(args.device)
+        opt = torch.optim.Adam(gen.parameters(), lr=float(getattr(args, "gen_lr", 1e-3)))
+
+        w_mean = float(getattr(args, "gen_w_mean", 1.0))
+        w_var = float(getattr(args, "gen_w_var", 0.1))
+        w_rff = float(getattr(args, "gen_w_rff", 1.0))
+        w_div = float(getattr(args, "gen_w_div", 0.01))
+        w_arr = float(getattr(args, "gen_w_arr", 0.0))
+
+        steps = int(getattr(args, "gen_steps", 2000))
+        batch_size = int(getattr(args, "gen_batch_size", 256))
+        print(f"[Stage-3] Training generator: steps={steps}, batch_size={batch_size}, d_low={low_feature_dim}, rf_dim={rf_dim_low}")
+        logger.info(f"[Stage-3] stage2_stats_path={stage2_stats_path}")
+
+        for step in range(steps):
+            # sample labels from qualified classes (uniform)
+            idx = torch.randint(low=0, high=qualified.numel(), size=(batch_size,), device=args.device)
+            y = qualified[idx].long()
+
+            mu_b, cov_diag_b, rf_b = gather_by_label(stats, y)
+            gen_res = gen(y, mu=mu_b, cov_diag=cov_diag_b, verbose=True)
+            x = gen_res["output"]
+            eps = gen_res["eps"]
+
+            uniq = torch.unique(y)
+            mean_loss = torch.tensor(0.0, device=args.device)
+            var_loss = torch.tensor(0.0, device=args.device)
+            rff_loss = torch.tensor(0.0, device=args.device)
+            n_used = 0
+            for c in uniq.tolist():
+                mask = (y == c)
+                if not torch.any(mask):
+                    continue
+                xs = x[mask]
+                n_used += 1
+
+                target_mu = stats.mu[c]
+                target_var = stats.cov_diag[c]
+                target_rf = stats.rf_mean[c]
+
+                mean_loss = mean_loss + F.mse_loss(xs.mean(dim=0), target_mu, reduction="mean")
+
+                if xs.shape[0] >= 2:
+                    v = xs.var(dim=0, unbiased=False)
+                    var_loss = var_loss + F.l1_loss(v, target_var, reduction="mean")
+
+                rf_mean_syn = rf_model_low(xs).mean(dim=0)
+                rff_loss = rff_loss + F.l1_loss(rf_mean_syn, target_rf, reduction="mean")
+
+            if n_used > 0:
+                mean_loss = mean_loss / n_used
+                var_loss = var_loss / n_used
+                rff_loss = rff_loss / n_used
+
+            div_loss = diversity_loss_fn(eps, x)
+
+            # ARR (non-negativity) only meaningful if output isn't ReLU-ed
+            if w_arr != 0.0:
+                arr_loss = (-torch.minimum(x, torch.zeros_like(x))).sum(dim=1).mean()
+            else:
+                arr_loss = torch.tensor(0.0, device=args.device)
+
+            loss = w_mean * mean_loss + w_var * var_loss + w_rff * rff_loss + w_div * div_loss + w_arr * arr_loss
+
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+
+            if step % 100 == 0 or step == steps - 1:
+                msg = (
+                    f"[Stage-3][{step:05d}/{steps}] "
+                    f"loss={loss.item():.6f} "
+                    f"mean={mean_loss.item():.6f} var={var_loss.item():.6f} "
+                    f"rff={rff_loss.item():.6f} div={div_loss.item():.6f} arr={arr_loss.item():.6f}"
+                )
+                print(msg)
+                logger.info(msg)
+
+        # Save artifacts
+        out_dir = getattr(args, "stage3_out_dir", None)
+        if out_dir is None:
+            out_dir = os.path.join(logdir, "stage3_gen")
+        mkdirs(out_dir)
+
+        gen_path = os.path.join(out_dir, "generator.pt")
+        torch.save(gen.state_dict(), gen_path)
+
+        meta_out = {
+            "stage": 3,
+            "dataset": meta.get("dataset", getattr(args, "dataset", None)),
+            "alg": meta.get("alg", getattr(args, "alg", None)),
+            "num_classes": num_classes,
+            "low_feature_dim": low_feature_dim,
+            "rf_dim_low": rf_dim_low,
+            "rbf_gamma_low": rbf_gamma_low,
+            "rf_type": rf_type,
+            "stage2_stats_path": stage2_stats_path,
+            "gen_seed": gen_seed,
+            "gen_hparams": {
+                "gen_noise_dim": int(getattr(args, "gen_noise_dim", 64)),
+                "gen_y_emb_dim": int(getattr(args, "gen_y_emb_dim", 32)),
+                "gen_stat_emb_dim": int(getattr(args, "gen_stat_emb_dim", 128)),
+                "gen_hidden_dim": int(getattr(args, "gen_hidden_dim", 256)),
+                "gen_n_hidden_layers": int(getattr(args, "gen_n_hidden_layers", 2)),
+                "gen_relu_output": int(getattr(args, "gen_relu_output", 1)),
+                "gen_use_cov_diag": int(getattr(args, "gen_use_cov_diag", 1)),
+                "gen_steps": steps,
+                "gen_batch_size": batch_size,
+                "gen_lr": float(getattr(args, "gen_lr", 1e-3)),
+                "weights": {
+                    "gen_w_mean": w_mean,
+                    "gen_w_var": w_var,
+                    "gen_w_rff": w_rff,
+                    "gen_w_div": w_div,
+                    "gen_w_arr": w_arr,
+                },
+            },
+        }
+        with open(os.path.join(out_dir, "generator_meta.json"), "w", encoding="utf-8") as f:
+            json.dump(meta_out, f, ensure_ascii=False, indent=2)
+
+        print(f"[Stage-3] Saved generator to: {gen_path}")
+        print(f"[Stage-3] Saved generator meta to: {os.path.join(out_dir, 'generator_meta.json')}")
+        raise SystemExit(0)
+
     # ===================== Resume Stage-1 (optional) =====================
     resume_payload = None
     if getattr(args, 'resume_ckpt_path', None):
@@ -1583,6 +1798,9 @@ if __name__ == '__main__':
                 'global_high_protos': _move_tensors_to_device(st.get('global_high_protos', {}), args.device),
                 'global_low_protos': _move_tensors_to_device(st.get('global_low_protos', {}), args.device),
                 'global_logits': _move_tensors_to_device(st.get('global_logits', {}), args.device),
+                # Global classifier head weights (GlobalFedmps) for consistent global_logits generation
+                # Keep on CPU; load_state_dict will copy to the model device.
+                'global_model_state_dict': st.get('global_model_state_dict', None),
                 'best_acc': best_state.get('best_acc', -float('inf')),
                 'best_std': best_state.get('best_std', -float('inf')),
                 'best_round': best_state.get('best_round', 0),
