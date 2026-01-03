@@ -33,6 +33,8 @@ import os
 import sys
 import random
 import time
+import logging
+from datetime import datetime
 from dataclasses import asdict
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
@@ -69,6 +71,64 @@ def _seed_all(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def _format_float_for_tag(x: float) -> str:
+    """
+    Format a float into a short, filesystem-friendly token.
+    Example: 0.15 -> "0p15", 1e-4 -> "0p0001"
+    """
+    s = f"{float(x):.6g}"  # compact, stable
+    s = s.replace("+", "")
+    return s.replace(".", "p")
+
+
+def _make_run_tag(args: argparse.Namespace) -> str:
+    """
+    Deterministic tag from key hparams to avoid accidental overwrite across runs.
+    """
+    return (
+        f"syn{_format_float_for_tag(args.syn_ratio)}"
+        f"_ooc{_format_float_for_tag(args.ooc_ratio)}"
+        f"_lam{_format_float_for_tag(args.ooc_lambda)}"
+        f"_{str(args.ooc_mode)}"
+        f"_steps{int(args.steps)}"
+        f"_bs{int(args.batch_size)}"
+        f"_lr{_format_float_for_tag(args.lr)}"
+        f"_wd{_format_float_for_tag(args.weight_decay)}"
+        f"_seed{int(args.seed)}"
+    )
+
+
+def _setup_logger(out_dir: str) -> logging.Logger:
+    """
+    Tee logs to both console and <out_dir>/stage4.log.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    logger = logging.getLogger("stage4")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    # Ensure file handler always points to the current out_dir (even if reused in same process).
+    if logger.handlers:
+        for h in list(logger.handlers):
+            try:
+                h.flush()
+                h.close()
+            except Exception:
+                pass
+            logger.removeHandler(h)
+
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    fh = logging.FileHandler(os.path.join(out_dir, "stage4.log"), encoding="utf-8")
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(fmt)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setLevel(logging.INFO)
+    sh.setFormatter(fmt)
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+    return logger
 
 
 def _as_int_indices(idxs) -> List[int]:
@@ -378,6 +438,19 @@ def main() -> int:
     p.add_argument("--gen_path", type=str, required=True, help="Stage-3 generator.pt path")
     p.add_argument("--split_path", type=str, default=None, help="split.pkl path (if None, infer from ckpt meta/args)")
     p.add_argument("--out_dir", type=str, default=None, help="Output dir (default: <ckpt.meta.logdir>/stage4_finetune)")
+    p.add_argument(
+        "--auto_run_dir",
+        type=int,
+        default=1,
+        help="If 1, create a unique subdir under out_dir/stage4_finetune to avoid overwrites (default: 1).",
+    )
+    p.add_argument("--run_name", type=str, default=None, help="Optional run name suffix for output dir.")
+    p.add_argument(
+        "--run_tag",
+        type=str,
+        default=None,
+        help="Optional run tag. If None, auto-generated from hparams (recommended).",
+    )
     p.add_argument("--gpu", type=int, default=0)
     p.add_argument("--seed", type=int, default=1234)
 
@@ -455,11 +528,29 @@ def main() -> int:
 
     # Resolve logdir/out_dir
     logdir = ckpt_meta.get("logdir", None) or ckpt_args.get("log_dir", None) or os.path.dirname(os.path.abspath(args.stage1_ckpt_path))
-    out_dir = args.out_dir or os.path.join(logdir, "stage4_finetune")
+    base_out_dir = args.out_dir or os.path.join(logdir, "stage4_finetune")
+    run_tag = str(args.run_tag).strip() if args.run_tag is not None else _make_run_tag(args)
+    if args.run_name:
+        run_tag = f"{run_tag}_{str(args.run_name).strip()}"
+
+    if int(args.auto_run_dir) == 1:
+        out_dir = os.path.join(base_out_dir, run_tag)
+        # If non-empty dir exists (repeat run), add timestamp to avoid overwrite.
+        if os.path.exists(out_dir) and os.listdir(out_dir):
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            out_dir = f"{out_dir}_{ts}"
+    else:
+        out_dir = base_out_dir
+
     os.makedirs(out_dir, exist_ok=True)
+    logger = _setup_logger(out_dir)
+    logger.info(f"[stage4] out_dir={out_dir}")
+    logger.info(f"[stage4] run_tag={run_tag} auto_run_dir={int(args.auto_run_dir)} run_name={args.run_name}")
+    logger.info(f"[stage4] cli_args={vars(args)}")
 
     # Resolve generator path (support stage3_gen and stage3_lowgen_minloop)
     gen_path = _resolve_generator_path(args.gen_path, logdir=logdir)
+    logger.info(f"[stage4] resolved_paths: stage1={args.stage1_ckpt_path} stage2={args.stage2_stats_path} gen={gen_path} split={split_path}")
 
     # Load split + datasets
     split = load_split(split_path)
@@ -528,6 +619,7 @@ def main() -> int:
         raise ValueError("Stage-1 checkpoint missing state['local_models_full_state_dicts']")
 
     # Persist a meta file for reproducibility
+    meta_path = os.path.join(out_dir, "stage4_meta.json")
     meta_out = {
         "stage": 4,
         "dataset": "cifar10",
@@ -538,6 +630,9 @@ def main() -> int:
         "gen_path": gen_path,
         "split_path": split_path,
         "out_dir": out_dir,
+        "run_tag": run_tag,
+        "run_name": args.run_name,
+        "auto_run_dir": int(args.auto_run_dir),
         "hparams": {
             "steps": int(args.steps),
             "batch_size": int(args.batch_size),
@@ -551,7 +646,7 @@ def main() -> int:
         },
         "gen_hparams": gen_h,
     }
-    with open(os.path.join(out_dir, "stage4_meta.json"), "w", encoding="utf-8") as f:
+    with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta_out, f, ensure_ascii=False, indent=2)
 
     # Stage-4 training loop per client
@@ -742,11 +837,11 @@ def main() -> int:
 
             if (step + 1) % int(args.log_interval) == 0:
                 dt = time.time() - t0
-                print(f"[stage4][cid={cid:02d}] step {step+1}/{int(args.steps)} loss={last_loss:.6f} sec={dt:.1f}")
+                logger.info(f"[stage4][cid={cid:02d}] step {step+1}/{int(args.steps)} loss={last_loss:.6f} sec={dt:.1f}")
 
             if (step + 1) % int(args.eval_interval) == 0 or (step + 1) == int(args.steps):
                 acc1, loss1 = _eval_client_on_images(m, dl_test, device=device, num_classes=num_classes)
-                print(f"[stage4][cid={cid:02d}] eval@{step+1}: acc={acc1:.4f} loss={loss1:.4f}")
+                logger.info(f"[stage4][cid={cid:02d}] eval@{step+1}: acc={acc1:.4f} loss={loss1:.4f}")
                 if int(args.save_best) == 1 and float(acc1) >= float(best_acc):
                     # Tie-break: prefer later step when acc ties (often improves calibration); adjust if you prefer earlier.
                     best_acc = float(acc1)
@@ -822,15 +917,46 @@ def main() -> int:
         )
 
     # Save summary
-    with open(os.path.join(out_dir, "stage4_results.json"), "w", encoding="utf-8") as f:
-        json.dump({"results": results, "sec_total": time.time() - start_all}, f, ensure_ascii=False, indent=2)
-
     acc_b = [r["acc_before"] for r in results]
     acc_a = [r["acc_after"] for r in results]
     acc_best = [r.get("acc_best", r["acc_after"]) for r in results]
-    print(f"[stage4] done. out_dir={out_dir}")
-    print(f"[stage4] mean acc before={float(np.mean(acc_b)):.4f} after={float(np.mean(acc_a)):.4f}")
-    print(f"[stage4] mean acc best={float(np.mean(acc_best)):.4f} (select_best_for_after={int(args.select_best_for_after)})")
+    mean_before = float(np.mean(acc_b)) if len(acc_b) > 0 else 0.0
+    mean_after = float(np.mean(acc_a)) if len(acc_a) > 0 else 0.0
+    mean_best = float(np.mean(acc_best)) if len(acc_best) > 0 else 0.0
+
+    results_path = os.path.join(out_dir, "stage4_results.json")
+    with open(results_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "results": results,
+                "sec_total": time.time() - start_all,
+                "out_dir": out_dir,
+                "run_tag": run_tag,
+                "run_name": args.run_name,
+                "auto_run_dir": int(args.auto_run_dir),
+                "mean_acc_before": mean_before,
+                "mean_acc_after": mean_after,
+                "mean_acc_best": mean_best,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    # Update meta with summary metrics (append-only for backwards compatibility)
+    meta_out["summary"] = {
+        "sec_total": float(time.time() - start_all),
+        "mean_acc_before": mean_before,
+        "mean_acc_after": mean_after,
+        "mean_acc_best": mean_best,
+        "select_best_for_after": int(args.select_best_for_after),
+    }
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta_out, f, ensure_ascii=False, indent=2)
+
+    logger.info(f"[stage4] done. out_dir={out_dir}")
+    logger.info(f"[stage4] mean acc before={mean_before:.4f} after={mean_after:.4f}")
+    logger.info(f"[stage4] mean acc best={mean_best:.4f} (select_best_for_after={int(args.select_best_for_after)})")
     return 0
 
 
