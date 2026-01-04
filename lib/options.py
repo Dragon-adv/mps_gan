@@ -150,13 +150,22 @@ def args_parser():
     parser.add_argument('--reuse_split', type=int, default=1,
                         help='If split_path exists, reuse it (1) or regenerate and overwrite (0). Default: 1')
 
+    # Stage-1: periodic prototype snapshot saving (OFF by default)
+    parser.add_argument('--save_round_protos', type=int, default=0,
+                        help='[Stage-1] Whether to periodically save global prototypes snapshots (0/1). Default: 0 (disabled)')
+    parser.add_argument('--round_proto_interval', type=int, default=10,
+                        help='[Stage-1] Save prototype snapshots every N rounds when --save_round_protos=1. Default: 10')
+    parser.add_argument('--round_proto_out_dir', type=str, default=None,
+                        help='[Stage-1] Directory to save prototype snapshots. If None, defaults to <log_dir>/stage1/protos')
+
     # Resume training
     parser.add_argument('--resume_ckpt_path', type=str, default=None,
                         help='Path to a checkpoint to resume Stage-1 training from (typically latest.pt)')
 
     # Safety guard: prevent accidental overwrite of an existing run
     parser.add_argument('--allow_restart', type=int, default=0,
-                        help='If 0, refuse to start from scratch when <log_dir>/stage1_ckpts/latest.pt exists. '
+                        help='If 0, refuse to start from scratch when Stage-1 latest checkpoint exists '
+                             '(<log_dir>/stage1/ckpts/latest.pt or legacy <log_dir>/stage1_ckpts/latest.pt). '
                              'Set to 1 only when you intentionally want to restart and overwrite latest.pt. Default: 0')
 
     # Stage-1 checkpoints
@@ -165,29 +174,29 @@ def args_parser():
     # ===================== Stage-2 statistics aggregation =====================
     # Stage-2 loads a Stage-1 checkpoint (typically best-wo.pt) and computes global statistics (low-only by default).
     parser.add_argument('--stage1_ckpt_path', type=str, default=None,
-                        help='[Stage-2] Path to a Stage-1 checkpoint to load (e.g., <log_dir>/stage1_ckpts/best-wo.pt). '
+                        help='[Stage-2] Path to a Stage-1 checkpoint to load (e.g., <log_dir>/stage1/ckpts/best-wo.pt). '
                              'If provided, stage-2 will infer log_dir/split_path from the checkpoint meta when possible.')
     parser.add_argument('--stage2_out_dir', type=str, default=None,
                         help='[Stage-2] Output directory to save stage-2 aggregated statistics. '
-                             'If None, defaults to <ckpt.meta.logdir>/stage2_stats (or <log_dir>/stage2_stats).')
+                             'If None, defaults to <ckpt.meta.logdir>/stage2/stats (or <log_dir>/stage2/stats).')
     
     # ===================== Stage-3 generator training =====================
     # Stage-3 trains a stats-conditioned generator for low-level features using Stage-2 global_stats.pt.
     parser.add_argument('--stage2_stats_path', type=str, default=None,
-                        help='[Stage-3] Path to Stage-2 global_stats.pt (e.g., <log_dir>/stage2_stats/global_stats.pt).')
+                        help='[Stage-3] Path to Stage-2 global_stats.pt (e.g., <log_dir>/stage2/stats/global_stats.pt).')
     parser.add_argument('--stage3_out_dir', type=str, default=None,
-                        help='[Stage-3] Output directory to save generator artifacts. If None, defaults to <log_dir>/stage3_gen')
+                        help='[Stage-3] Output directory to save generator artifacts. If None, defaults to <log_dir>/stage3/gen')
 
     # ===================== Stage-4 feature finetune (client-side) =====================
     # Stage-4 loads Stage-1 ckpt + Stage-2 stats + Stage-3 generator to finetune (fc0+fc1+fc2) using mixed real/synthetic low features.
     parser.add_argument('--stage4_stage1_ckpt_path', type=str, default=None,
-                        help='[Stage-4] Path to a Stage-1 checkpoint (e.g., <log_dir>/stage1_ckpts/best-wo.pt).')
+                        help='[Stage-4] Path to a Stage-1 checkpoint (e.g., <log_dir>/stage1/ckpts/best-wo.pt).')
     parser.add_argument('--stage4_stage2_stats_path', type=str, default=None,
-                        help='[Stage-4] Path to Stage-2 global_stats.pt (e.g., <log_dir>/stage2_stats/global_stats.pt).')
+                        help='[Stage-4] Path to Stage-2 global_stats.pt (e.g., <log_dir>/stage2/stats/global_stats.pt).')
     parser.add_argument('--stage4_gen_path', type=str, default=None,
-                        help='[Stage-4] Path to Stage-3 generator.pt (e.g., <log_dir>/stage3_gen/generator.pt).')
+                        help='[Stage-4] Path to Stage-3 generator.pt (e.g., <log_dir>/stage3/gen/generator.pt).')
     parser.add_argument('--stage4_out_dir', type=str, default=None,
-                        help='[Stage-4] Output directory. If None, defaults to <log_dir>/stage4_finetune')
+                        help='[Stage-4] Output directory. If None, defaults to <log_dir>/stage4/finetune')
     parser.add_argument('--stage4_steps', type=int, default=2000,
                         help='[Stage-4] Training steps per client (default: 2000)')
     parser.add_argument('--stage4_batch_size', type=int, default=128,
@@ -207,7 +216,7 @@ def args_parser():
     # Used by exps/run_stage3_lowgen_minloop.py (kept here for a unified arg surface).
     parser.add_argument('--stage3_minloop_out_dir', type=str, default=None,
                         help='[Stage-3-minloop] Output directory for lowgen minimal loop. '
-                             'If None, defaults to <ckpt.meta.logdir>/stage3_lowgen_minloop')
+                             'If None, defaults to <ckpt.meta.logdir>/stage3/lowgen_minloop')
     parser.add_argument('--lambda_high_mean', type=float, default=1.0,
                         help='[Stage-3-minloop] Weight for high-level mean-then-norm matching loss')
     parser.add_argument('--alpha_teacher', type=float, default=1.0,
@@ -237,7 +246,7 @@ def args_parser():
     parser.add_argument('--gen_w_div', type=float, default=0.01, help='[Stage-3] Weight for diversity regularizer')
     parser.add_argument('--gen_w_arr', type=float, default=0.0, help='[Stage-3] Weight for non-negativity range regularizer (ARR)')
     parser.add_argument('--stage1_ckpt_dir', type=str, default=None,
-                        help='Directory to store Stage-1 checkpoints. If None, defaults to <log_dir>/stage1_ckpts')
+                        help='Directory to store Stage-1 checkpoints. If None, defaults to <log_dir>/stage1/ckpts')
     parser.add_argument('--save_latest_ckpt', type=int, default=1,
                         help='Whether to save latest checkpoint for resume (0/1). Default: 1')
     parser.add_argument('--latest_ckpt_interval', type=int, default=1,

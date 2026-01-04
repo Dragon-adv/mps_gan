@@ -956,7 +956,15 @@ class LocalUpdate(object):
         loss = -mean_log_prob_pos.mean()
         return loss
 
-    def get_local_statistics(self, model, rf_models, args, stats_level='high', high_stats_mode: str = 'per_sample_norm'):
+    def get_local_statistics(
+        self,
+        model,
+        rf_models,
+        args,
+        stats_level: str = 'high',
+        high_stats_mode: str = 'per_sample_norm',
+        low_stats_mode: str = 'per_sample_norm',
+    ):
         """
         计算本地统计量，用于 SFD 算法的统计量聚合阶段。
 
@@ -977,6 +985,9 @@ class LocalUpdate(object):
             high_stats_mode: high-level 统计口径（仅影响 high-level 的 z 用于 class_means/class_outers 统计）：
                         - 'per_sample_norm': 对每个样本的 high feature 先做 F.normalize，再统计（保持原有默认行为）
                         - 'raw': 使用 high_level_features_raw 直接统计（不做 per-sample normalize）
+            low_stats_mode: low-level 统计口径（影响 low-level 的 z 和 rf 输入，用于 class_means/class_outers/class_rf_means 统计）：
+                        - 'per_sample_norm': 对每个样本的 low feature 先做 F.normalize，再统计（保持原有默认行为）
+                        - 'raw': 使用 low_level_features_raw 直接统计（不做 per-sample normalize；用于 Stage-2/3/4 语义对齐）
 
         返回:
             dict: 包含以下结构的字典
@@ -1050,9 +1061,17 @@ class LocalUpdate(object):
                     rfs_high.append(rf_high.detach().cpu())
                 
                 if compute_low:
-                    low_features_norm = F.normalize(low_features, dim=1)
-                    rf_low = rf_models['low'](low_features_norm)
-                    zs_low.append(low_features_norm.detach().cpu())  # 存储归一化版本用于统计量计算
+                    # IMPORTANT:
+                    # CNNCifar.forward() returns low_level_features_raw (flatten output). Stage-3/Stage-4 treat
+                    # generator outputs as "raw low features" fed into fc0 via forward_from_low().
+                    # Therefore, when Stage-2 wants to produce low stats consistent with Stage-3/4, it should
+                    # use low_stats_mode='raw' (no per-sample normalize).
+                    if str(low_stats_mode).lower() == 'raw':
+                        low_z = low_features
+                    else:
+                        low_z = F.normalize(low_features, dim=1)
+                    rf_low = rf_models['low'](low_z)
+                    zs_low.append(low_z.detach().cpu())
                     rfs_low.append(rf_low.detach().cpu())
 
         # 将列表拼接成大张量

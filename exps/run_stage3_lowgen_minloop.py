@@ -181,7 +181,7 @@ def main() -> None:
     parser.add_argument("--stage1_ckpt_path", type=str, required=True, help="Path to Stage-1 checkpoint (best-wo.pt / latest.pt)")
     parser.add_argument("--stage2_stats_path", type=str, required=True, help="Path to Stage-2 global_stats.pt")
     parser.add_argument("--split_path", type=str, default=None, help="Path to split.pkl (if None, infer from ckpt meta when possible)")
-    parser.add_argument("--out_dir", type=str, default=None, help="Output directory (default: <ckpt.meta.logdir>/stage3_lowgen_minloop)")
+    parser.add_argument("--out_dir", type=str, default=None, help="Output directory (default: <ckpt.meta.logdir>/stage3/lowgen_minloop)")
 
     parser.add_argument("--device", type=str, default=None, help="cuda | cpu (default: auto)")
     parser.add_argument("--seed", type=int, default=1234)
@@ -237,7 +237,7 @@ def main() -> None:
 
     logdir = ckpt_meta.get("logdir", None) or ckpt_args.get("log_dir", None) or os.path.dirname(os.path.abspath(args.stage1_ckpt_path))
     if args.out_dir is None:
-        args.out_dir = os.path.join(logdir, "stage3_lowgen_minloop")
+        args.out_dir = os.path.join(logdir, "stage3", "lowgen_minloop")
     os.makedirs(args.out_dir, exist_ok=True)
     logger = _setup_logging(args.out_dir)
     tb_dir = os.path.join(args.out_dir, "tb")

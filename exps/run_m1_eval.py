@@ -12,7 +12,7 @@ M1 离线评估（CIFAR-10 + CNNCifar）
   - high-level 特征质量/多样性指标（在 high_norm 空间）
 
 用法示例：
-  python exps/run_m1_eval.py --stage1_ckpt_path "<LOGDIR>/stage1_ckpts/best-wo.pt"
+  python exps/run_m1_eval.py --stage1_ckpt_path "<LOGDIR>/stage1/ckpts/best-wo.pt"
 """
 
 import argparse
@@ -59,11 +59,14 @@ def _infer_logdir_from_ckpt(stage1_ckpt_path: str, ckpt_meta: dict) -> str:
     meta_logdir = (ckpt_meta or {}).get("logdir", None)
     if meta_logdir:
         return meta_logdir
-    # typical: <logdir>/stage1_ckpts/best-wo.pt
+    # typical (legacy): <logdir>/stage1_ckpts/best-wo.pt
+    # typical (new):    <logdir>/stage1/ckpts/best-wo.pt
     ckpt_abs = os.path.abspath(stage1_ckpt_path)
     ckpt_dir = os.path.dirname(ckpt_abs)
     if os.path.basename(ckpt_dir) == "stage1_ckpts":
         return os.path.dirname(ckpt_dir)
+    if os.path.basename(ckpt_dir) == "ckpts" and os.path.basename(os.path.dirname(ckpt_dir)) == "stage1":
+        return os.path.dirname(os.path.dirname(ckpt_dir))
     return ckpt_dir
 
 

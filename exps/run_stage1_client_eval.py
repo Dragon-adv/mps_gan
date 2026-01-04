@@ -12,7 +12,7 @@
   (client_id, class_id, n_train, n_test, acc_test, loss_ce_test, n_all, acc_all, loss_ce_all)
 
 用法示例：
-  python exps/run_stage1_client_eval.py --stage1_ckpt_path "<LOGDIR>/stage1_ckpts/best-wo.pt"
+  python exps/run_stage1_client_eval.py --stage1_ckpt_path "<LOGDIR>/stage1/ckpts/best-wo.pt"
 """
 
 import argparse
@@ -60,6 +60,8 @@ def _infer_logdir_from_ckpt(stage1_ckpt_path: str, ckpt_meta: dict) -> str:
     ckpt_dir = os.path.dirname(ckpt_abs)
     if os.path.basename(ckpt_dir) == "stage1_ckpts":
         return os.path.dirname(ckpt_dir)
+    if os.path.basename(ckpt_dir) == "ckpts" and os.path.basename(os.path.dirname(ckpt_dir)) == "stage1":
+        return os.path.dirname(os.path.dirname(ckpt_dir))
     return ckpt_dir
 
 

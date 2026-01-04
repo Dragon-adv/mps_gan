@@ -5,7 +5,7 @@ Stage-3 runner for FedMPS: train stats-conditioned low-level feature generator.
 
 Usage examples:
   python exps/run_stage3.py --log_dir ../newresults/ours/my_run
-  python exps/run_stage3.py --stage2_stats_path ../newresults/ours/my_run/stage2_stats/global_stats.pt
+  python exps/run_stage3.py --stage2_stats_path ../newresults/ours/my_run/stage2/stats/global_stats.pt
   python exps/run_stage3.py --gpu 0 --steps 5000 --batch_size 512 --lr 1e-3
 
 Note:
@@ -35,10 +35,13 @@ def main() -> int:
     if log_dir is None:
         # default: infer from stats_path if provided
         if args.stage2_stats_path:
-            # expected: <log_dir>/stage2_stats/global_stats.pt
+            # expected (new): <log_dir>/stage2/stats/global_stats.pt
+            # expected (old): <log_dir>/stage2_stats/global_stats.pt
             stage2_dir = os.path.dirname(os.path.abspath(args.stage2_stats_path))
             if os.path.basename(stage2_dir) == "stage2_stats":
                 log_dir = os.path.dirname(stage2_dir)
+            elif os.path.basename(stage2_dir) == "stats" and os.path.basename(os.path.dirname(stage2_dir)) == "stage2":
+                log_dir = os.path.dirname(os.path.dirname(stage2_dir))
             else:
                 log_dir = stage2_dir
         else:
@@ -50,7 +53,17 @@ def main() -> int:
         "--stage", "3",
         "--log_dir", log_dir,
         "--gpu", str(args.gpu),
-        "--stage2_stats_path", str(args.stage2_stats_path) if args.stage2_stats_path else os.path.join(log_dir, "stage2_stats", "global_stats.pt"),
+        "--stage2_stats_path",
+        (
+            str(args.stage2_stats_path)
+            if args.stage2_stats_path
+            else (
+                os.path.join(log_dir, "stage2", "stats", "global_stats.pt")
+                if os.path.exists(os.path.join(log_dir, "stage2", "stats", "global_stats.pt"))
+                or not os.path.exists(os.path.join(log_dir, "stage2_stats", "global_stats.pt"))
+                else os.path.join(log_dir, "stage2_stats", "global_stats.pt")
+            )
+        ),
         "--gen_steps", str(args.steps),
         "--gen_batch_size", str(args.batch_size),
         "--gen_lr", str(args.lr),

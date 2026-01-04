@@ -10,7 +10,7 @@
 # 用法示例：
 #   python exps/run_stage1.py --gpu 0 --rounds 300
 #   python exps/run_stage1.py --log_dir ../newresults/ours/my_run --reuse_split 1
-#   python exps/run_stage1.py --resume_ckpt_path ../newresults/ours/my_run/stage1_ckpts/latest.pt
+#   python exps/run_stage1.py --resume_ckpt_path ../newresults/ours/my_run/stage1/ckpts/latest.pt
 
 import argparse
 import os

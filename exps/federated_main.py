@@ -635,7 +635,12 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         'beta_pi': getattr(args, 'beta_pi', 0.5)
     }
     
-    metadata_path = os.path.join(logdir, 'data_distribution_metadata.pkl')
+    # Stage-1 outputs are isolated under <log_dir>/stage1 to avoid mixing with other stages.
+    stage1_dir = os.path.join(logdir, 'stage1')
+    mkdirs(stage1_dir)
+    meta_dir = os.path.join(stage1_dir, 'meta')
+    mkdirs(meta_dir)
+    metadata_path = os.path.join(meta_dir, 'data_distribution_metadata.pkl')
     with open(metadata_path, 'wb') as f:
         pickle.dump(metadata_dict, f)
     
@@ -856,8 +861,16 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         summary_writer.add_scalar('scalar/Total_Test_Avg_Accuracy_wp', np.mean(acc_list_g), round)
 
         # ========== 原型稳定性分析 (Prototype Data) ==========
-        # 每隔 10 个 Round,保存当前的 global_high_protos 和 global_low_protos
-        if (round + 1) % 10 == 0:
+        # 默认关闭；如需开启：--save_round_protos 1 （并可用 --round_proto_interval 控制频率）
+        if int(getattr(args, 'save_round_protos', 0)) == 1:
+            interval = int(getattr(args, 'round_proto_interval', 10))
+            if interval <= 0:
+                interval = 10
+        else:
+            interval = None
+
+        # 每隔 N 个 Round,保存当前的 global_high_protos 和 global_low_protos
+        if interval is not None and ((round + 1) % int(interval) == 0):
             # 将原型转换为 CPU 并脱离计算图
             proto_data = {
                 'round': round + 1,
@@ -883,8 +896,12 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
                 elif isinstance(proto_list, torch.Tensor):
                     proto_data['global_low_protos'][class_idx] = proto_list.cpu().detach().numpy()
             
-            # 保存到 pickle 文件
-            proto_save_path = os.path.join(logdir, f'prototypes_round_{round+1}.pkl')
+            # 保存到 pickle 文件（隔离到 log_dir/stage1/protos 下，避免与其它 stage 混杂/覆盖）
+            proto_out_dir = getattr(args, 'round_proto_out_dir', None)
+            if proto_out_dir is None:
+                proto_out_dir = os.path.join(logdir, 'stage1', 'protos')
+            mkdirs(proto_out_dir)
+            proto_save_path = os.path.join(proto_out_dir, f'prototypes_round_{round+1}.pkl')
             with open(proto_save_path, 'wb') as f:
                 pickle.dump(proto_data, f)
 
@@ -900,7 +917,7 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         # ========== Stage-1 Checkpointing (latest overwrite + best-wo/wp no-overwrite) ==========
         ckpt_dir = getattr(args, 'stage1_ckpt_dir', None)
         if ckpt_dir is None:
-            ckpt_dir = os.path.join(logdir, 'stage1_ckpts')
+            ckpt_dir = os.path.join(logdir, 'stage1', 'ckpts')
         mkdirs(ckpt_dir)
 
         mean_wo = float(np.mean(acc_list_l)) if len(acc_list_l) > 0 else 0.0
@@ -1104,8 +1121,12 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
     logger.info('| BEST ROUND (w/ protos): {} | Test Acc: {:.5f}±{:.5f}'.format(best_round_w, best_acc_w, best_std_w))
     
     # Save final SFD statistics (from the last round)
-    # Use the same logdir pattern as the main function
-    save_dir = os.path.join('../newresults', args.alg, str(datetime.datetime.now().strftime("%Y-%m-%d/%H.%M.%S"))+'_'+args.dataset+'_n'+str(args.ways)+'_sfd_stats')
+    # Keep it under the same run log_dir, isolated into Stage-1 folder to avoid overwrites/mixing.
+    save_dir_base = os.path.join(logdir, 'stage1', 'sfd_stats_final')
+    save_dir = save_dir_base
+    if os.path.exists(save_dir) and os.listdir(save_dir):
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        save_dir = f"{save_dir_base}_{ts}"
     mkdirs(save_dir)
     
     # Save final global statistics from the last round
@@ -1160,7 +1181,7 @@ if __name__ == '__main__':
     stage2_payload = None
     if stage == 2:
         if getattr(args, 'stage1_ckpt_path', None) is None:
-            raise ValueError('Stage-2 requires --stage1_ckpt_path (e.g., <log_dir>/stage1_ckpts/best-wo.pt).')
+            raise ValueError('Stage-2 requires --stage1_ckpt_path (e.g., <log_dir>/stage1/ckpts/best-wo.pt).')
         try:
             stage2_payload = load_checkpoint(args.stage1_ckpt_path, map_location='cpu')
         except Exception as e:
@@ -1200,9 +1221,12 @@ if __name__ == '__main__':
     if getattr(args, 'resume_ckpt_path', None) and args.log_dir is None:
         ckpt_abs = os.path.abspath(args.resume_ckpt_path)
         ckpt_dir = os.path.dirname(ckpt_abs)
-        # typical: <logdir>/stage1_ckpts/latest.pt
+        # typical (legacy): <logdir>/stage1_ckpts/latest.pt
+        # typical (new):    <logdir>/stage1/ckpts/latest.pt
         if os.path.basename(ckpt_dir) == 'stage1_ckpts':
             args.log_dir = os.path.dirname(ckpt_dir)
+        elif os.path.basename(ckpt_dir) == 'ckpts' and os.path.basename(os.path.dirname(ckpt_dir)) == 'stage1':
+            args.log_dir = os.path.dirname(os.path.dirname(ckpt_dir))
         else:
             args.log_dir = ckpt_dir
 
@@ -1213,26 +1237,34 @@ if __name__ == '__main__':
         logdir = os.path.join('../newresults', args.alg, str(datetime.datetime.now().strftime("%Y-%m-%d/%H.%M.%S"))+'_'+args.dataset+'_n'+str(args.ways))
     mkdirs(logdir)
 
+    # Stage-scoped directory under the same run logdir to avoid overwrites/mixing across stages.
+    stage = int(getattr(args, 'stage', 1))
+    stage_dir = os.path.join(logdir, f"stage{stage}")
+    mkdirs(stage_dir)
+    setattr(args, 'stage_dir', stage_dir)
+
     # ===================== Safety guard: prevent accidental overwrite =====================
     # If the user points to an existing logdir that already has a latest checkpoint, we refuse to
     # start from scratch unless allow_restart=1. This prevents "latest.pt got overwritten by a new run".
-    ckpt_dir_default = os.path.join(logdir, 'stage1_ckpts')
-    latest_default = os.path.join(ckpt_dir_default, 'latest.pt')
+    ckpt_dir_default_new = os.path.join(logdir, 'stage1', 'ckpts')
+    ckpt_dir_default_old = os.path.join(logdir, 'stage1_ckpts')
+    latest_default_new = os.path.join(ckpt_dir_default_new, 'latest.pt')
+    latest_default_old = os.path.join(ckpt_dir_default_old, 'latest.pt')
     # Only Stage-1 can overwrite latest.pt; Stage-2/3 are offline utilities.
     if stage == 1 and getattr(args, 'resume_ckpt_path', None) is None:
-        if os.path.exists(latest_default) and int(getattr(args, 'allow_restart', 0)) != 1:
+        if (os.path.exists(latest_default_new) or os.path.exists(latest_default_old)) and int(getattr(args, 'allow_restart', 0)) != 1:
             raise RuntimeError(
-                "检测到该 log_dir 下已存在 stage1_ckpts/latest.pt，但你没有指定 --resume_ckpt_path。\n"
+                "检测到该 log_dir 下已存在 Stage-1 latest checkpoint，但你没有指定 --resume_ckpt_path。\n"
                 "为避免误覆盖断点文件，程序已停止。\n"
                 "解决方案：\n"
-                "  1) 断点续训：加上 --resume_ckpt_path \"<log_dir>\\stage1_ckpts\\latest.pt\"\n"
+                "  1) 断点续训：加上 --resume_ckpt_path \"<log_dir>\\stage1\\ckpts\\latest.pt\"（或旧版 <log_dir>\\stage1_ckpts\\latest.pt）\n"
                 "  2) 确认要从头重跑并覆盖 latest.pt：加上 --allow_restart 1\n"
             )
 
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
     logging.basicConfig(
-        filename=os.path.join(logdir, 'log.log'),
+        filename=os.path.join(stage_dir, 'log.log'),
         format='[%(levelname)s](%(asctime)s) %(message)s',
         datefmt='%Y/%m/%d/ %I:%M:%S %p', level=logging.DEBUG, filemode='w')
     logger = logging.getLogger()
@@ -1243,8 +1275,8 @@ if __name__ == '__main__':
     logging.info("="*60)
     logging.info(args)
 
-    # Put TensorBoard events into a subdir to avoid mixing with checkpoints/other artifacts.
-    tb_logdir = os.path.join(logdir, 'tb')
+    # Put TensorBoard events into a stage-scoped subdir to avoid mixing across stages.
+    tb_logdir = os.path.join(stage_dir, 'tb')
     mkdirs(tb_logdir)
     summary_writer = SummaryWriter(tb_logdir)
 
@@ -1272,7 +1304,7 @@ if __name__ == '__main__':
         # Resolve output dir
         stage2_out_dir = getattr(args, 'stage2_out_dir', None)
         if stage2_out_dir is None:
-            stage2_out_dir = os.path.join(logdir, 'stage2_stats')
+            stage2_out_dir = os.path.join(logdir, 'stage2', 'stats')
         mkdirs(stage2_out_dir)
 
         # Stage-2 requires a persisted split for consistency
@@ -1403,7 +1435,8 @@ if __name__ == '__main__':
                 rf_models=rf_models,
                 args=args,
                 stats_level='both',
-                high_stats_mode='raw'
+                high_stats_mode='raw',
+                low_stats_mode='raw',
             )
             client_responses.append(local_stats)
 
@@ -1483,7 +1516,10 @@ if __name__ == '__main__':
 
         stage2_stats_path = getattr(args, "stage2_stats_path", None)
         if stage2_stats_path is None:
-            stage2_stats_path = os.path.join(logdir, "stage2_stats", "global_stats.pt")
+            cand_new = os.path.join(logdir, "stage2", "stats", "global_stats.pt")
+            cand_old = os.path.join(logdir, "stage2_stats", "global_stats.pt")
+            # Backward-compatible fallback if an old run already has stage2_stats/global_stats.pt
+            stage2_stats_path = cand_new if (os.path.exists(cand_new) or not os.path.exists(cand_old)) else cand_old
         if not os.path.exists(stage2_stats_path):
             raise FileNotFoundError(f"[Stage-3] stage2_stats_path not found: {stage2_stats_path}")
 
@@ -1621,7 +1657,7 @@ if __name__ == '__main__':
         # Save artifacts
         out_dir = getattr(args, "stage3_out_dir", None)
         if out_dir is None:
-            out_dir = os.path.join(logdir, "stage3_gen")
+            out_dir = os.path.join(logdir, "stage3", "gen")
         mkdirs(out_dir)
 
         gen_path = os.path.join(out_dir, "generator.pt")

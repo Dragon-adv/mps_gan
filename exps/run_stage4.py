@@ -19,9 +19,9 @@ Design:
 
 Usage (example):
   python exps/run_stage4.py ^
-    --stage1_ckpt_path ..\\newresults\\ours\\<LOGDIR>\\stage1_ckpts\\best-wo.pt ^
-    --stage2_stats_path ..\\newresults\\ours\\<LOGDIR>\\stage2_stats\\global_stats.pt ^
-    --gen_path ..\\newresults\\ours\\<LOGDIR>\\stage3_gen\\generator.pt ^
+    --stage1_ckpt_path ..\\newresults\\ours\\<LOGDIR>\\stage1\\ckpts\\best-wo.pt ^
+    --stage2_stats_path ..\\newresults\\ours\\<LOGDIR>\\stage2\\stats\\global_stats.pt ^
+    --gen_path ..\\newresults\\ours\\<LOGDIR>\\stage3\\gen\\generator.pt ^
     --syn_ratio 0.2 --steps 2000 --batch_size 128 --lr 1e-4 --gpu 0
 """
 
@@ -280,8 +280,9 @@ def _resolve_generator_path(
     Resolve generator.pt path.
     - If user passes a directory, look for generator.pt inside it.
     - If user passes a non-existing path, try common candidates under logdir:
-        1) <logdir>/stage3_gen/generator.pt
-        2) <logdir>/stage3_lowgen_minloop/generator.pt
+        1) <logdir>/stage3/gen/generator.pt
+        2) <logdir>/stage3/lowgen_minloop/generator.pt
+        (also supports legacy: stage3_gen/ and stage3_lowgen_minloop/)
     """
     gen_path_cli = _resolve_existing_path(gen_path_cli)
 
@@ -298,6 +299,10 @@ def _resolve_generator_path(
 
     # Fallback to typical locations under logdir.
     cands = [
+        # new layout
+        os.path.join(logdir, "stage3", "gen", "generator.pt"),
+        os.path.join(logdir, "stage3", "lowgen_minloop", "generator.pt"),
+        # legacy layout
         os.path.join(logdir, "stage3_gen", "generator.pt"),
         os.path.join(logdir, "stage3_lowgen_minloop", "generator.pt"),
     ]
@@ -437,12 +442,12 @@ def main() -> int:
     p.add_argument("--stage2_stats_path", type=str, required=True, help="Stage-2 global_stats.pt path")
     p.add_argument("--gen_path", type=str, required=True, help="Stage-3 generator.pt path")
     p.add_argument("--split_path", type=str, default=None, help="split.pkl path (if None, infer from ckpt meta/args)")
-    p.add_argument("--out_dir", type=str, default=None, help="Output dir (default: <ckpt.meta.logdir>/stage4_finetune)")
+    p.add_argument("--out_dir", type=str, default=None, help="Output dir (default: <ckpt.meta.logdir>/stage4/finetune)")
     p.add_argument(
         "--auto_run_dir",
         type=int,
         default=1,
-        help="If 1, create a unique subdir under out_dir/stage4_finetune to avoid overwrites (default: 1).",
+        help="If 1, create a unique subdir under out_dir/stage4/finetune to avoid overwrites (default: 1).",
     )
     p.add_argument("--run_name", type=str, default=None, help="Optional run name suffix for output dir.")
     p.add_argument(
@@ -452,7 +457,8 @@ def main() -> int:
         help="Optional run tag. If None, auto-generated from hparams (recommended).",
     )
     p.add_argument("--gpu", type=int, default=0)
-    p.add_argument("--seed", type=int, default=1234)
+    # If not provided, we will auto-generate a random seed and log it for reproducibility.
+    p.add_argument("--seed", type=int, default=None)
 
     # Stage-4 training hyperparams
     p.add_argument("--steps", type=int, default=2000)
@@ -506,6 +512,11 @@ def main() -> int:
 
     args = p.parse_args()
 
+    # Resolve seed: if user didn't specify, generate a run-specific seed and record it.
+    # Keep it in 32-bit positive int range for broad compatibility with numpy/torch seeding.
+    if args.seed is None:
+        args.seed = int(time.time_ns() % (2**31 - 1))
+
     device = _resolve_device(args.gpu)
     _seed_all(int(args.seed))
 
@@ -528,7 +539,7 @@ def main() -> int:
 
     # Resolve logdir/out_dir
     logdir = ckpt_meta.get("logdir", None) or ckpt_args.get("log_dir", None) or os.path.dirname(os.path.abspath(args.stage1_ckpt_path))
-    base_out_dir = args.out_dir or os.path.join(logdir, "stage4_finetune")
+    base_out_dir = args.out_dir or os.path.join(logdir, "stage4", "finetune")
     run_tag = str(args.run_tag).strip() if args.run_tag is not None else _make_run_tag(args)
     if args.run_name:
         run_tag = f"{run_tag}_{str(args.run_name).strip()}"
@@ -546,9 +557,10 @@ def main() -> int:
     logger = _setup_logger(out_dir)
     logger.info(f"[stage4] out_dir={out_dir}")
     logger.info(f"[stage4] run_tag={run_tag} auto_run_dir={int(args.auto_run_dir)} run_name={args.run_name}")
+    logger.info(f"[stage4] resolved_seed={args.seed}")
     logger.info(f"[stage4] cli_args={vars(args)}")
 
-    # Resolve generator path (support stage3_gen and stage3_lowgen_minloop)
+    # Resolve generator path (support stage3/gen and stage3/lowgen_minloop; also legacy stage3_gen and stage3_lowgen_minloop)
     gen_path = _resolve_generator_path(args.gen_path, logdir=logdir)
     logger.info(f"[stage4] resolved_paths: stage1={args.stage1_ckpt_path} stage2={args.stage2_stats_path} gen={gen_path} split={split_path}")
 
