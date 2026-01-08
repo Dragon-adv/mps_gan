@@ -206,8 +206,8 @@ def main() -> None:
     parser.add_argument("--log_path", required=True, help="stage4_cvae_pool.log 路径")
     parser.add_argument(
         "--output_dir",
-        default="analysis/plots_stage4_cvae_pool",
-        help="输出图片目录",
+        default=None,
+        help="输出图片目录，默认为 log_path 同级目录下的 plots_stage4",
     )
     parser.add_argument(
         "--clients",
@@ -222,7 +222,26 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # 如果未指定 output_dir，则默认为 log_path 同级目录下的 plots_stage4
+    if args.output_dir is None:
+        log_dir = os.path.dirname(os.path.abspath(args.log_path))
+        args.output_dir = os.path.join(log_dir, "plots_stage4")
+
     clients_logs = parse_log(args.log_path)
+
+    # 将 acc_before 插入为 step 0 的数据点，以便曲线从初始状态开始
+    for log in clients_logs.values():
+        if log.acc_before is not None:
+            # 只有当 step 0 不存在时才插入，避免重复
+            if not log.eval_steps or log.eval_steps[0] != 0:
+                log.eval_steps.insert(0, 0)
+                log.eval_acc.insert(0, log.acc_before)
+                # 由于日志中 done 行通常不包含微调前的 loss，我们用第一个 eval 的 loss 填充
+                # 这样可以保持列表长度一致，且对 loss 曲线的影响最小
+                if log.eval_loss:
+                    log.eval_loss.insert(0, log.eval_loss[0])
+                else:
+                    log.eval_loss.insert(0, 0.0)
 
     # 选择客户端
     if args.clients != "all":
