@@ -181,7 +181,20 @@ def main() -> None:
     parser.add_argument("--stage1_ckpt_path", type=str, required=True, help="Path to Stage-1 checkpoint (best-wo.pt / latest.pt)")
     parser.add_argument("--stage2_stats_path", type=str, required=True, help="Path to Stage-2 global_stats.pt")
     parser.add_argument("--split_path", type=str, default=None, help="Path to split.pkl (if None, infer from ckpt meta when possible)")
-    parser.add_argument("--out_dir", type=str, default=None, help="Output directory (default: <ckpt.meta.logdir>/stage3/lowgen_minloop)")
+    parser.add_argument("--out_dir", type=str, default=None, help="Output directory base (default: <ckpt.meta.logdir>/stage3/lowgen_minloop_<TAG>)")
+    parser.add_argument(
+        "--run_tag",
+        type=str,
+        default=None,
+        help="Optional run tag suffix for output dir. If None, auto-generated from hparams (recommended).",
+    )
+    parser.add_argument("--run_name", type=str, default=None, help="Optional extra suffix appended to run_tag for output dir.")
+    parser.add_argument(
+        "--auto_run_dir",
+        type=int,
+        default=1,
+        help="If 1, auto-create a unique out_dir with a visible suffix to avoid overwrites (default: 1).",
+    )
 
     parser.add_argument("--device", type=str, default=None, help="cuda | cpu (default: auto)")
     parser.add_argument("--seed", type=int, default=1234)
@@ -236,8 +249,35 @@ def main() -> None:
         raise FileNotFoundError(f"split_path not found: {args.split_path}")
 
     logdir = ckpt_meta.get("logdir", None) or ckpt_args.get("log_dir", None) or os.path.dirname(os.path.abspath(args.stage1_ckpt_path))
-    if args.out_dir is None:
-        args.out_dir = os.path.join(logdir, "stage3", "lowgen_minloop")
+    # Resolve output dir (make suffix explicit to avoid mixing with other Stage-3 variants)
+    def _make_run_tag(a) -> str:
+        # Keep it filesystem-friendly and informative; avoid overly long paths.
+        return (
+            f"minloop"
+            f"_bs{int(a.gen_batch_size)}"
+            f"_steps{int(a.gen_steps)}"
+            f"_lr{float(a.gen_lr):.0e}"
+            f"_lhm{float(a.lambda_high_mean):g}"
+            f"_at{float(a.alpha_teacher):g}"
+            f"_div{float(a.eta_div):g}"
+            f"_seed{int(a.seed)}"
+        )
+
+    base_out = args.out_dir or os.path.join(logdir, "stage3", "lowgen_minloop")
+    run_tag = str(args.run_tag).strip() if args.run_tag is not None else _make_run_tag(args)
+    if args.run_name:
+        run_tag = f"{run_tag}_{str(args.run_name).strip()}"
+
+    if int(args.auto_run_dir) == 1:
+        out_dir = f"{base_out}_{run_tag}"
+        # If non-empty dir exists (repeat run), add timestamp to avoid overwrite.
+        if os.path.exists(out_dir) and os.listdir(out_dir):
+            ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+            out_dir = f"{out_dir}_{ts}"
+    else:
+        out_dir = base_out
+
+    args.out_dir = out_dir
     os.makedirs(args.out_dir, exist_ok=True)
     logger = _setup_logging(args.out_dir)
     tb_dir = os.path.join(args.out_dir, "tb")
@@ -249,6 +289,7 @@ def main() -> None:
     logger.info(f"stage2_stats_path={args.stage2_stats_path}")
     logger.info(f"split_path={args.split_path}")
     logger.info(f"out_dir={args.out_dir}")
+    logger.info(f"run_tag={run_tag} auto_run_dir={int(args.auto_run_dir)} run_name={args.run_name}")
 
     # Seeds
     random.seed(args.seed)

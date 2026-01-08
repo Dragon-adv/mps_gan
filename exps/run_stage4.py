@@ -298,7 +298,7 @@ def _resolve_generator_path(
         return gen_path_cli
 
     # Fallback to typical locations under logdir.
-    cands = [
+    cands: List[str] = [
         # new layout
         os.path.join(logdir, "stage3", "gen", "generator.pt"),
         os.path.join(logdir, "stage3", "lowgen_minloop", "generator.pt"),
@@ -306,6 +306,31 @@ def _resolve_generator_path(
         os.path.join(logdir, "stage3_gen", "generator.pt"),
         os.path.join(logdir, "stage3_lowgen_minloop", "generator.pt"),
     ]
+
+    # Also support suffix-style stage3 minloop outputs:
+    #   <logdir>/stage3/lowgen_minloop_<TAG>/generator.pt
+    #   <logdir>/stage3_lowgen_minloop_<TAG>/generator.pt   (legacy-style base with suffix)
+    def _scan_suffix_dirs(base_parent: str, prefix: str) -> List[str]:
+        try:
+            if not os.path.isdir(base_parent):
+                return []
+            out = []
+            for name in os.listdir(base_parent):
+                if not name.startswith(prefix):
+                    continue
+                d = os.path.join(base_parent, name)
+                if not os.path.isdir(d):
+                    continue
+                gp = os.path.join(d, "generator.pt")
+                if os.path.exists(gp):
+                    out.append(gp)
+            return out
+        except Exception:
+            return []
+
+    cands.extend(_scan_suffix_dirs(os.path.join(logdir, "stage3"), "lowgen_minloop_"))
+    cands.extend(_scan_suffix_dirs(logdir, "stage3_lowgen_minloop_"))
+
     existing = [p for p in cands if os.path.exists(p)]
     if len(existing) == 1:
         print(f"[stage4] Warning: --gen_path not found. Fallback to: {existing[0]}")
