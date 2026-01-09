@@ -22,11 +22,13 @@ import json
 import logging
 import os
 import random
+import math
 import sys
 import time
 from datetime import datetime
+from collections import Counter, defaultdict
 from types import SimpleNamespace
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -68,6 +70,9 @@ def _format_float_for_tag(x: float) -> str:
 
 
 def _make_run_tag(args: argparse.Namespace) -> str:
+    pf = "all"
+    if args.syn_filter_proportion is not None and float(args.syn_filter_proportion) > 0:
+        pf = _format_float_for_tag(args.syn_filter_proportion)
     return (
         f"cvae_pool"
         f"_pr{_format_float_for_tag(args.pool_ratio)}"
@@ -76,6 +81,7 @@ def _make_run_tag(args: argparse.Namespace) -> str:
         f"_syn{_format_float_for_tag(args.syn_ratio)}"
         f"_a{_format_float_for_tag(args.syn_alpha)}"
         f"_r{int(args.syn_scale_by_ratio)}"
+        f"_pf{pf}"
         f"_{str(args.syn_label_sampling)}"
         f"_steps{int(args.steps)}"
         f"_bs{int(args.batch_size)}"
@@ -392,13 +398,19 @@ def _build_or_load_pool(
     return pools
 
 
-def _sample_from_pool(pools: Dict[int, torch.Tensor], y: torch.Tensor, *, device: str) -> torch.Tensor:
+def _sample_from_pool(
+    pools: Dict[int, torch.Tensor],
+    y: torch.Tensor,
+    *,
+    device: str,
+    return_indices: bool = False,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     pools[c]: (M_c, D) on CPU; y: (B,) on device.
     returns x: (B, D) on device.
     """
     y_cpu = y.detach().cpu().long()
-    out_chunks: List[torch.Tensor] = []
+    out_chunks: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
     for c in torch.unique(y_cpu).tolist():
         c = int(c)
         mask = (y_cpu == c)
@@ -409,14 +421,122 @@ def _sample_from_pool(pools: Dict[int, torch.Tensor], y: torch.Tensor, *, device
         m = int(pool_c.shape[0])
         ridx = torch.randint(low=0, high=m, size=(int(idxs.numel()),), dtype=torch.long)
         x_sel = pool_c[ridx].to(device)
-        out_chunks.append((idxs, x_sel))
+        out_chunks.append((idxs, x_sel, ridx))
 
     # stitch back in original order
     d = int(next(iter(pools.values())).shape[1])
     x = torch.empty((int(y_cpu.numel()), d), device=device, dtype=torch.float32)
-    for idxs, x_sel in out_chunks:
+    sel_indices = torch.empty((int(y_cpu.numel()),), dtype=torch.long) if return_indices else None
+    for idxs, x_sel, ridx in out_chunks:
         x[idxs.to(device)] = x_sel
+        if return_indices and sel_indices is not None:
+            sel_indices[idxs] = ridx
+    if return_indices:
+        return x, sel_indices
     return x
+
+
+def _compute_client_class_prototypes(
+    model: nn.Module,
+    dataset,
+    idxs: List[int],
+    *,
+    batch_size: int,
+    device: str,
+    num_classes: int,
+) -> Dict[int, torch.Tensor]:
+    """
+    计算客户端训练集各类别的低层特征原型 (均值)。
+    返回: {class_id: prototype (1,D) on CPU}
+    """
+    loader = DataLoader(
+        Subset(dataset, idxs),
+        batch_size=int(batch_size),
+        shuffle=False,
+        num_workers=0,
+        drop_last=False,
+    )
+    sums: Dict[int, torch.Tensor] = {}
+    counts: Dict[int, int] = {}
+    feature_dim: Optional[int] = None
+    model.eval()
+    with torch.no_grad():
+        for images, labels in loader:
+            images = images.to(device)
+            labels = labels.to(device).long()
+            _logits, _lp, _h, low_raw, _proj = model(images)
+            if feature_dim is None:
+                feature_dim = int(low_raw.shape[1])
+            for cls in torch.unique(labels).tolist():
+                cls = int(cls)
+                mask = labels == cls
+                if not mask.any():
+                    continue
+                feats = low_raw[mask]
+                if cls not in sums:
+                    sums[cls] = torch.zeros((int(feature_dim)), device=device, dtype=torch.float32)
+                    counts[cls] = 0
+                sums[cls] += feats.sum(dim=0)
+                counts[cls] += int(mask.sum().item())
+    out: Dict[int, torch.Tensor] = {}
+    for cls, s in sums.items():
+        cnt = counts.get(cls, 0)
+        if cnt > 0:
+            out[int(cls)] = (s / float(cnt)).detach().cpu()
+    return out
+
+
+def _filter_pools_by_prototypes(
+    pools: Dict[int, torch.Tensor],
+    prototypes: Dict[int, torch.Tensor],
+    *,
+    proportion: float,
+    logger: Optional[logging.Logger] = None,
+) -> Dict[int, torch.Tensor]:
+    """
+    按照与本地类原型的余弦相似度，筛选池中前 proportion 的特征。
+    返回: 仅包含被过滤替换的类别，保持在 CPU。
+    """
+    if proportion is None or proportion <= 0:
+        return {}
+
+    filtered: Dict[int, torch.Tensor] = {}
+    for cls, proto in prototypes.items():
+        pool_c = pools.get(int(cls), None)
+        if pool_c is None or pool_c.numel() == 0:
+            continue
+        total = int(pool_c.shape[0])
+        k = max(1, int(math.ceil(total * float(proportion))))
+        k = min(k, total)
+
+        proto_n = F.normalize(proto.view(1, -1), dim=1)
+        pool_n = F.normalize(pool_c, dim=1)
+        sims = torch.matmul(pool_n, proto_n.t()).view(-1)
+        topk = torch.topk(sims, k=k, largest=True, sorted=False)
+        filtered[int(cls)] = pool_c[topk.indices].contiguous()
+
+        if logger is not None:
+            logger.info(
+                f"[filter_pool] class={cls} kept={int(filtered[int(cls)].shape[0])}/{total} proportion={proportion:.3f}"
+            )
+    return filtered
+
+
+def _merge_filtered_pools(
+    base_pools: Dict[int, torch.Tensor],
+    filtered: Dict[int, torch.Tensor],
+) -> Dict[int, torch.Tensor]:
+    """
+    用过滤后的池覆盖对应类别，其余类别保持原样。
+    返回新的 dict，不修改原始 base_pools。
+    """
+    out: Dict[int, torch.Tensor] = {}
+    for cls, pool in base_pools.items():
+        if int(cls) in filtered:
+            out[int(cls)] = filtered[int(cls)]
+        else:
+            out[int(cls)] = pool
+    return out
 
 
 def main() -> int:
@@ -455,6 +575,12 @@ def main() -> int:
         choices=["global_uniform", "batch_labels", "client_classes"],
         help="How to sample synthetic labels y_syn.",
     )
+    p.add_argument(
+        "--syn_filter_proportion",
+        type=float,
+        default=None,
+        help="When using client_classes sampling, keep top proportion (0,1] synthetic features most similar to local class prototype by cosine similarity. None or <=0 disables filtering.",
+    )
 
     # Pool building (auto)
     p.add_argument("--pool_ratio", type=float, default=1.0)
@@ -476,6 +602,9 @@ def main() -> int:
     args = p.parse_args()
     if args.seed is None:
         args.seed = int(time.time_ns() % (2**31 - 1))
+    if args.syn_filter_proportion is not None:
+        if float(args.syn_filter_proportion) <= 0 or float(args.syn_filter_proportion) > 1:
+            raise ValueError("--syn_filter_proportion must be in (0,1]; got {}".format(args.syn_filter_proportion))
 
     device = _resolve_device(args.gpu)
     _seed_all(int(args.seed))
@@ -632,6 +761,7 @@ def main() -> int:
                     "syn_alpha": float(args.syn_alpha),
                     "syn_scale_by_ratio": int(args.syn_scale_by_ratio),
                     "syn_label_sampling": str(args.syn_label_sampling),
+                    "syn_filter_proportion": float(args.syn_filter_proportion) if args.syn_filter_proportion is not None else None,
                     "seed": int(args.seed),
                 },
                 "cvae_cfg": {
@@ -687,6 +817,48 @@ def main() -> int:
             drop_last=False,
         )
 
+        # 可选：基于本地类原型过滤合成特征池
+        use_filter = (
+            args.syn_filter_proportion is not None
+            and float(args.syn_filter_proportion) > 0
+            and str(args.syn_label_sampling).lower() == "client_classes"
+        )
+        client_pools = pools
+        filter_kept: Dict[int, Dict[str, int]] = {}
+        if use_filter:
+            prototypes = _compute_client_class_prototypes(
+                m,
+                train_dataset,
+                train_idxs,
+                batch_size=int(args.batch_size),
+                device=device,
+                num_classes=num_classes,
+            )
+            if len(prototypes) == 0:
+                logger.info(f"[filter_pool] cid={cid:02d} no prototypes found, fallback to global pool.")
+            else:
+                filtered = _filter_pools_by_prototypes(
+                    pools,
+                    prototypes,
+                    proportion=float(args.syn_filter_proportion),
+                    logger=logger,
+                )
+                if len(filtered) > 0:
+                    client_pools = _merge_filtered_pools(pools, filtered)
+                    filter_kept = {
+                        int(c): {
+                            "kept": int(client_pools[int(c)].shape[0]),
+                            "base": int(pools[int(c)].shape[0]),
+                        }
+                        for c in filtered.keys()
+                    }
+                    logger.info(
+                        f"[filter_pool] cid={cid:02d} syn_filter_proportion={float(args.syn_filter_proportion):.3f} "
+                        f"filtered_classes={sorted(list(filtered.keys()))}"
+                    )
+                else:
+                    logger.info(f"[filter_pool] cid={cid:02d} prototypes ok but no filtered pools produced, fallback.")
+
         # Sanity: infer low dim from a real batch
         m.eval()
         images0, labels0 = next(iter(dl_train))
@@ -718,90 +890,143 @@ def main() -> int:
         best_step = 0
         best_state = None
 
-        while step < int(args.steps):
-            try:
-                images, labels = next(it)
-            except StopIteration:
-                it = iter(dl_train)
-                images, labels = next(it)
-            images = images.to(device)
-            labels = labels.to(device).long()
+        # 区间累积器：只在 eval 间隔写一次
+        label_counts: Counter = Counter()
+        index_counts: Dict[int, Counter] = defaultdict(Counter)
+        total_syn = 0
+        interval_start = 1
 
-            with torch.no_grad():
-                _logits_r, _lp_r, _h_r, low_real, _proj_r = m(images)
+        selection_log_path = os.path.join(out_dir, f"client_{cid:02d}_syn_selection.jsonl")
+        with open(selection_log_path, "w", encoding="utf-8") as sel_log:
+            sel_log.write(
+                json.dumps(
+                    {
+                        "client_id": int(cid),
+                        "type": "filter_meta",
+                        "syn_filter_proportion": float(args.syn_filter_proportion)
+                        if args.syn_filter_proportion is not None
+                        else None,
+                        "filtered_classes": sorted(list(filter_kept.keys())) if filter_kept else [],
+                        "filter_kept": filter_kept,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            while step < int(args.steps):
+                try:
+                    images, labels = next(it)
+                except StopIteration:
+                    it = iter(dl_train)
+                    images, labels = next(it)
+                images = images.to(device)
+                labels = labels.to(device).long()
 
-            b_real = int(low_real.shape[0])
-            b_syn = int(round(float(b_real) * float(args.syn_ratio)))
-            if int(args.syn_batch_size) > 0:
-                b_syn = int(args.syn_batch_size)
+                with torch.no_grad():
+                    _logits_r, _lp_r, _h_r, low_real, _proj_r = m(images)
 
-            logits_real, _lp_real, _h_real, _proj_real = m.forward_from_low(low_real)
-            logits_real = logits_real[:, 0:num_classes]
-            real_ce = F.cross_entropy(logits_real, labels, reduction="mean")
+                b_real = int(low_real.shape[0])
+                b_syn = int(round(float(b_real) * float(args.syn_ratio)))
+                if int(args.syn_batch_size) > 0:
+                    b_syn = int(args.syn_batch_size)
 
-            syn_ce = torch.tensor(0.0, device=device)
-            ratio = (float(b_syn) / float(b_real)) if (b_real > 0) else 0.0
+                logits_real, _lp_real, _h_real, _proj_real = m.forward_from_low(low_real)
+                logits_real = logits_real[:, 0:num_classes]
+                real_ce = F.cross_entropy(logits_real, labels, reduction="mean")
 
-            if b_syn > 0:
-                sampling = str(args.syn_label_sampling).lower()
-                if sampling == "global_uniform":
-                    q = torch.tensor(qualified, dtype=torch.long, device=device)
-                    ridx = torch.randint(low=0, high=int(q.numel()), size=(b_syn,), device=device)
-                    y_syn = q[ridx].long()
-                elif sampling == "batch_labels":
-                    ridx = torch.randint(low=0, high=b_real, size=(b_syn,), device=device)
-                    y_syn = labels[ridx].long()
-                elif sampling == "client_classes":
-                    present = client_present.get(int(cid), []) or []
-                    if len(present) == 0:
+                syn_ce = torch.tensor(0.0, device=device)
+                ratio = (float(b_syn) / float(b_real)) if (b_real > 0) else 0.0
+
+                if b_syn > 0:
+                    sampling = str(args.syn_label_sampling).lower()
+                    if sampling == "global_uniform":
+                        q = torch.tensor(qualified, dtype=torch.long, device=device)
+                        ridx = torch.randint(low=0, high=int(q.numel()), size=(b_syn,), device=device)
+                        y_syn = q[ridx].long()
+                    elif sampling == "batch_labels":
                         ridx = torch.randint(low=0, high=b_real, size=(b_syn,), device=device)
                         y_syn = labels[ridx].long()
+                    elif sampling == "client_classes":
+                        present = client_present.get(int(cid), []) or []
+                        if len(present) == 0:
+                            ridx = torch.randint(low=0, high=b_real, size=(b_syn,), device=device)
+                            y_syn = labels[ridx].long()
+                        else:
+                            present_t = torch.tensor(present, dtype=torch.long, device=device)
+                            ridx = torch.randint(low=0, high=int(present_t.numel()), size=(b_syn,), device=device)
+                            y_syn = present_t[ridx].long()
                     else:
-                        present_t = torch.tensor(present, dtype=torch.long, device=device)
-                        ridx = torch.randint(low=0, high=int(present_t.numel()), size=(b_syn,), device=device)
-                        y_syn = present_t[ridx].long()
+                        raise ValueError(f"Unsupported --syn_label_sampling: {args.syn_label_sampling}")
+
+                    x_syn, sel_idx = _sample_from_pool(client_pools, y_syn, device=device, return_indices=True)
+                    logits_syn, _lp_syn, _h_syn, _proj_syn = m.forward_from_low(x_syn)
+                    logits_syn = logits_syn[:, 0:num_classes]
+                    syn_ce = F.cross_entropy(logits_syn, y_syn, reduction="mean")
+
+                    # 累积本区间的标签与池索引频次
+                    ys_cpu = y_syn.detach().cpu().tolist()
+                    idx_cpu = sel_idx.detach().cpu().tolist()
+                    label_counts.update(int(y) for y in ys_cpu)
+                    for yv, iv in zip(ys_cpu, idx_cpu):
+                        index_counts[int(yv)][int(iv)] += 1
+                    total_syn += int(b_syn)
+
+                if int(args.syn_scale_by_ratio) == 1:
+                    syn_ce_eff = syn_ce * ratio
                 else:
-                    raise ValueError(f"Unsupported --syn_label_sampling: {args.syn_label_sampling}")
+                    syn_ce_eff = syn_ce
 
-                x_syn = _sample_from_pool(pools, y_syn, device=device)
-                logits_syn, _lp_syn, _h_syn, _proj_syn = m.forward_from_low(x_syn)
-                logits_syn = logits_syn[:, 0:num_classes]
-                syn_ce = F.cross_entropy(logits_syn, y_syn, reduction="mean")
+                alpha = float(args.syn_alpha)
+                loss = real_ce + alpha * syn_ce_eff
 
-            if int(args.syn_scale_by_ratio) == 1:
-                syn_ce_eff = syn_ce * ratio
-            else:
-                syn_ce_eff = syn_ce
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                if step == 0:
+                    _assert_grad_flow(m)
+                opt.step()
+                last_loss = float(loss.item())
 
-            alpha = float(args.syn_alpha)
-            loss = real_ce + alpha * syn_ce_eff
+                if (step + 1) % int(args.log_interval) == 0:
+                    dt = time.time() - t0
+                    logger.info(
+                        f"[stage4_cvae_pool][cid={cid:02d}] step {step+1}/{int(args.steps)} "
+                        f"loss={last_loss:.6f} real_ce={float(real_ce.item()):.6f} syn_ce={float(syn_ce.item()):.6f} "
+                        f"ratio={ratio:.3f} alpha={alpha:.4g} sec={dt:.1f}"
+                    )
 
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            if step == 0:
-                _assert_grad_flow(m)
-            opt.step()
-            last_loss = float(loss.item())
+                if (step + 1) % int(args.eval_interval) == 0 or (step + 1) == int(args.steps):
+                    acc1, loss1 = _eval_client_on_images(m, dl_test, device=device, num_classes=num_classes)
+                    logger.info(f"[stage4_cvae_pool][cid={cid:02d}] eval@{step+1}: acc={acc1:.4f} loss={loss1:.4f}")
+                    if int(args.save_best) == 1 and float(acc1) >= float(best_acc):
+                        best_acc = float(acc1)
+                        best_loss = float(loss1)
+                        best_step = int(step + 1)
+                        best_state = {k: v.detach().cpu().clone() for k, v in m.state_dict().items()}
+                    m.train()
 
-            if (step + 1) % int(args.log_interval) == 0:
-                dt = time.time() - t0
-                logger.info(
-                    f"[stage4_cvae_pool][cid={cid:02d}] step {step+1}/{int(args.steps)} "
-                    f"loss={last_loss:.6f} real_ce={float(real_ce.item()):.6f} syn_ce={float(syn_ce.item()):.6f} "
-                    f"ratio={ratio:.3f} alpha={alpha:.4g} sec={dt:.1f}"
-                )
+                    # 在两次 eval 之间写一条汇总记录
+                    rec = {
+                        "client_id": int(cid),
+                        "eval_step": int(step + 1),
+                        "step_start": int(interval_start),
+                        "step_end": int(step + 1),
+                        "total_syn": int(total_syn),
+                        "label_counts": {int(k): int(v) for k, v in label_counts.items()},
+                        "index_counts": {
+                            int(lbl): {int(idx): int(cnt) for idx, cnt in cnts.items()}
+                            for lbl, cnts in index_counts.items()
+                        },
+                    }
+                    sel_log.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    sel_log.flush()
 
-            if (step + 1) % int(args.eval_interval) == 0 or (step + 1) == int(args.steps):
-                acc1, loss1 = _eval_client_on_images(m, dl_test, device=device, num_classes=num_classes)
-                logger.info(f"[stage4_cvae_pool][cid={cid:02d}] eval@{step+1}: acc={acc1:.4f} loss={loss1:.4f}")
-                if int(args.save_best) == 1 and float(acc1) >= float(best_acc):
-                    best_acc = float(acc1)
-                    best_loss = float(loss1)
-                    best_step = int(step + 1)
-                    best_state = {k: v.detach().cpu().clone() for k, v in m.state_dict().items()}
-                m.train()
+                    # 重置区间累积器
+                    label_counts.clear()
+                    index_counts = defaultdict(Counter)
+                    total_syn = 0
+                    interval_start = int(step + 2)
 
-            step += 1
+                step += 1
 
         accF, lossF = _eval_client_on_images(m, dl_test, device=device, num_classes=num_classes)
         # 如果开启 save_best 但 best_state 仍为 None（理论上不会出现，因为初始 best_acc=-1），则兜底用最终模型
@@ -837,6 +1062,8 @@ def main() -> int:
                     "syn_alpha": float(args.syn_alpha),
                     "syn_scale_by_ratio": int(args.syn_scale_by_ratio),
                     "syn_label_sampling": str(args.syn_label_sampling),
+                    "syn_filter_proportion": float(args.syn_filter_proportion) if args.syn_filter_proportion is not None else None,
+                    "syn_filter_kept": {int(k): {kk: int(vv) for kk, vv in v.items()} for k, v in filter_kept.items()},
                     "acc_before": float(acc0),
                     "loss_before": float(loss0),
                     "acc_after": float(acc_after),
