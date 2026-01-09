@@ -48,6 +48,32 @@ from lib.split_manager import load_split
 from lib.utils import get_dataset
 
 
+def _maybe_win_long_path(path: str) -> str:
+    """
+    Windows 经典 MAX_PATH 限制下，超长路径有时会以 FileNotFoundError 的形式报错。
+
+    这里在路径较长时自动转换为绝对路径并添加 long-path 前缀（\\\\?\\），
+    以确保 open/torch.save 等 IO 在 Windows 上稳定工作。
+
+    - 非 Windows：原样返回
+    - Windows：长度较短时返回绝对路径；超长时返回带前缀的绝对路径
+    """
+    if os.name != "nt":
+        return path
+
+    p = os.path.abspath(path)
+    # 经验阈值：接近 260 时就可能触发问题（包含后续拼接/内部展开）
+    if len(p) < 240:
+        return p
+
+    if p.startswith("\\\\?\\"):
+        return p
+    # UNC: \\server\share\... -> \\?\UNC\server\share\...
+    if p.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + p.lstrip("\\")
+    return "\\\\?\\" + p
+
+
 def _resolve_device(gpu: int) -> str:
     if torch.cuda.is_available() and gpu is not None and int(gpu) >= 0:
         torch.cuda.set_device(int(gpu))
@@ -73,6 +99,7 @@ def _make_run_tag(args: argparse.Namespace) -> str:
     pf = "all"
     if args.syn_filter_proportion is not None and float(args.syn_filter_proportion) > 0:
         pf = _format_float_for_tag(args.syn_filter_proportion)
+    pft = str(args.syn_filter_target) if getattr(args, "syn_filter_target", None) else "local"
     return (
         f"cvae_pool"
         f"_pr{_format_float_for_tag(args.pool_ratio)}"
@@ -82,6 +109,7 @@ def _make_run_tag(args: argparse.Namespace) -> str:
         f"_a{_format_float_for_tag(args.syn_alpha)}"
         f"_r{int(args.syn_scale_by_ratio)}"
         f"_pf{pf}"
+        f"_pft{pft}"
         f"_{str(args.syn_label_sampling)}"
         f"_steps{int(args.steps)}"
         f"_bs{int(args.batch_size)}"
@@ -107,7 +135,7 @@ def _setup_logger(out_dir: str) -> logging.Logger:
             logger.removeHandler(h)
 
     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-    fh = logging.FileHandler(os.path.join(out_dir, "stage4_cvae_pool.log"), encoding="utf-8")
+    fh = logging.FileHandler(_maybe_win_long_path(os.path.join(out_dir, "stage4_cvae_pool.log")), encoding="utf-8")
     fh.setLevel(logging.INFO)
     fh.setFormatter(fmt)
     sh = logging.StreamHandler(sys.stdout)
@@ -157,9 +185,9 @@ def _resolve_cvae_path(cvae_path_cli: str) -> str:
 def _load_cvae_meta(gen_path: str) -> dict:
     d = os.path.dirname(os.path.abspath(gen_path))
     meta_path = os.path.join(d, "generator_meta.json")
-    if not os.path.exists(meta_path):
+    if not os.path.exists(_maybe_win_long_path(meta_path)):
         raise FileNotFoundError(f"generator_meta.json not found next to cVAE generator: {meta_path}")
-    with open(meta_path, "r", encoding="utf-8") as f:
+    with open(_maybe_win_long_path(meta_path), "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -183,7 +211,7 @@ def _load_cvae(gen_path: str, *, device: str, y_emb_dim: int = 32) -> Tuple[Cond
         kl_anneal_steps=int(c.get("kl_anneal_steps", 0)),
     )
     model = ConditionalFeatureVAE(cfg).to(device)
-    sd = torch.load(gen_path, map_location="cpu")
+    sd = torch.load(_maybe_win_long_path(gen_path), map_location="cpu")
     model.load_state_dict(sd, strict=True)
     model.eval()
     for p in model.parameters():
@@ -350,17 +378,20 @@ def _build_or_load_pool(
     device: str,
     logger: logging.Logger,
 ) -> Dict[int, torch.Tensor]:
-    if int(rebuild_pool) != 1 and os.path.exists(pool_path):
-        logger.info(f"[pool] loading existing pool: {pool_path}")
-        obj = torch.load(pool_path, map_location="cpu")
+    pool_path_abs = os.path.abspath(pool_path)
+    pool_path_io = _maybe_win_long_path(pool_path_abs)
+
+    if int(rebuild_pool) != 1 and os.path.exists(pool_path_io):
+        logger.info(f"[pool] loading existing pool: {pool_path_abs}")
+        obj = torch.load(pool_path_io, map_location="cpu")
         pools = obj.get("pools", None) if isinstance(obj, dict) else None
         if not isinstance(pools, dict):
             raise ValueError("Invalid pool file: missing dict key 'pools'")
         out = {int(k): v.float() for k, v in pools.items()}
         return out
 
-    os.makedirs(os.path.dirname(os.path.abspath(pool_path)), exist_ok=True)
-    logger.info(f"[pool] building pool (rebuild={int(rebuild_pool)}): {pool_path}")
+    os.makedirs(_maybe_win_long_path(os.path.dirname(pool_path_abs)), exist_ok=True)
+    logger.info(f"[pool] building pool (rebuild={int(rebuild_pool)}): {pool_path_abs}")
 
     num_classes = int(cvae.cfg.num_classes)
     pools: Dict[int, torch.Tensor] = {}
@@ -393,7 +424,7 @@ def _build_or_load_pool(
         },
         "pools": pools,
     }
-    torch.save(payload, pool_path)
+    torch.save(payload, pool_path_io)
     logger.info("[pool] saved.")
     return pools
 
@@ -436,17 +467,16 @@ def _sample_from_pool(
     return x
 
 
-def _compute_client_class_prototypes(
+def _compute_class_prototypes(
     model: nn.Module,
     dataset,
     idxs: List[int],
     *,
     batch_size: int,
     device: str,
-    num_classes: int,
 ) -> Dict[int, torch.Tensor]:
     """
-    计算客户端训练集各类别的低层特征原型 (均值)。
+    计算给定样本索引集合的各类别低层特征原型 (均值)。
     返回: {class_id: prototype (1,D) on CPU}
     """
     loader = DataLoader(
@@ -579,7 +609,14 @@ def main() -> int:
         "--syn_filter_proportion",
         type=float,
         default=None,
-        help="When using client_classes sampling, keep top proportion (0,1] synthetic features most similar to local class prototype by cosine similarity. None or <=0 disables filtering.",
+        help="When using client_classes sampling, keep top proportion (0,1] synthetic features most similar to class prototype (source set by --syn_filter_target). None or <=0 disables filtering.",
+    )
+    p.add_argument(
+        "--syn_filter_target",
+        type=str,
+        default="local",
+        choices=["local", "global"],
+        help="Prototype source for filtering synthetic pool when syn_filter_proportion>0. 'local' uses per-client real data; 'global' uses global prototypes computed once.",
     )
 
     # Pool building (auto)
@@ -638,7 +675,8 @@ def main() -> int:
     else:
         out_dir = base_out_dir
 
-    os.makedirs(out_dir, exist_ok=True)
+    out_dir = os.path.abspath(out_dir)
+    os.makedirs(_maybe_win_long_path(out_dir), exist_ok=True)
     logger = _setup_logger(out_dir)
     logger.info(f"[stage4_cvae_pool] out_dir={out_dir}")
     logger.info(f"[stage4_cvae_pool] run_tag={run_tag} auto_run_dir={int(args.auto_run_dir)} run_name={args.run_name}")
@@ -678,6 +716,41 @@ def main() -> int:
     logger.info(f"[stage4_cvae_pool] qualified_classes={qualified}")
     logger.info(f"[stage4_cvae_pool] global_counts={global_counts.tolist()}")
 
+    local_sd = ckpt_state.get("local_models_full_state_dicts", None)
+    if not isinstance(local_sd, dict):
+        raise ValueError("Stage-1 checkpoint missing state['local_models_full_state_dicts']")
+
+    # 可选：预先计算全局原型（一次）
+    global_prototypes: Optional[Dict[int, torch.Tensor]] = None
+    if (
+        args.syn_filter_proportion is not None
+        and float(args.syn_filter_proportion) > 0
+        and str(args.syn_filter_target).lower() == "global"
+    ):
+        all_train_indices = _as_int_indices([user_groups[int(cid)] for cid in range(int(num_users))])
+        if len(all_train_indices) == 0:
+            logger.info("[global_proto] no train indices found; skip global prototype computation.")
+        else:
+            ref_key = next(iter(local_sd.keys()))
+            ref_model = CNNCifar(args=SimpleNamespace(**{"num_classes": num_classes})).to(device)
+            ref_model.load_state_dict(local_sd[ref_key], strict=True)
+            logger.info(
+                f"[global_proto] computing prototypes using ref client={ref_key} samples={len(all_train_indices)} "
+                f"batch_size={int(args.batch_size)}"
+            )
+            global_prototypes = _compute_class_prototypes(
+                ref_model,
+                train_dataset,
+                all_train_indices,
+                batch_size=int(args.batch_size),
+                device=device,
+            )
+            logger.info(
+                f"[global_proto] done. classes_with_proto={sorted(list(global_prototypes.keys())) if global_prototypes else []}"
+            )
+            ref_model.cpu()
+            del ref_model
+
     # Build/load pool
     pool_path = args.pool_path or os.path.join(out_dir, "feature_pool.pt")
     pools = _build_or_load_pool(
@@ -697,10 +770,6 @@ def main() -> int:
     if int(args.build_pool_only) == 1:
         logger.info("[stage4_cvae_pool] build_pool_only=1 -> done.")
         return 0
-
-    local_sd = ckpt_state.get("local_models_full_state_dicts", None)
-    if not isinstance(local_sd, dict):
-        raise ValueError("Stage-1 checkpoint missing state['local_models_full_state_dicts']")
 
     # Pre-compute per-client present classes (for syn_label_sampling='client_classes')
     client_present: Dict[int, List[int]] = {}
@@ -725,7 +794,8 @@ def main() -> int:
             client_present[int(cid)] = present
 
     meta_path = os.path.join(out_dir, "stage4_cvae_pool_meta.json")
-    with open(meta_path, "w", encoding="utf-8") as f:
+    os.makedirs(_maybe_win_long_path(os.path.dirname(meta_path)), exist_ok=True)
+    with open(_maybe_win_long_path(meta_path), "w", encoding="utf-8") as f:
         json.dump(
             {
                 "stage": 4,
@@ -762,6 +832,7 @@ def main() -> int:
                     "syn_scale_by_ratio": int(args.syn_scale_by_ratio),
                     "syn_label_sampling": str(args.syn_label_sampling),
                     "syn_filter_proportion": float(args.syn_filter_proportion) if args.syn_filter_proportion is not None else None,
+                    "syn_filter_target": str(args.syn_filter_target),
                     "seed": int(args.seed),
                 },
                 "cvae_cfg": {
@@ -826,16 +897,18 @@ def main() -> int:
         client_pools = pools
         filter_kept: Dict[int, Dict[str, int]] = {}
         if use_filter:
-            prototypes = _compute_client_class_prototypes(
-                m,
-                train_dataset,
-                train_idxs,
-                batch_size=int(args.batch_size),
-                device=device,
-                num_classes=num_classes,
-            )
+            if str(args.syn_filter_target).lower() == "global":
+                prototypes = global_prototypes or {}
+            else:
+                prototypes = _compute_class_prototypes(
+                    m,
+                    train_dataset,
+                    train_idxs,
+                    batch_size=int(args.batch_size),
+                    device=device,
+                )
             if len(prototypes) == 0:
-                logger.info(f"[filter_pool] cid={cid:02d} no prototypes found, fallback to global pool.")
+                logger.info(f"[filter_pool] cid={cid:02d} no prototypes found (target={args.syn_filter_target}), fallback to global pool.")
             else:
                 filtered = _filter_pools_by_prototypes(
                     pools,
@@ -897,7 +970,8 @@ def main() -> int:
         interval_start = 1
 
         selection_log_path = os.path.join(out_dir, f"client_{cid:02d}_syn_selection.jsonl")
-        with open(selection_log_path, "w", encoding="utf-8") as sel_log:
+        os.makedirs(_maybe_win_long_path(os.path.dirname(selection_log_path)), exist_ok=True)
+        with open(_maybe_win_long_path(selection_log_path), "w", encoding="utf-8") as sel_log:
             sel_log.write(
                 json.dumps(
                     {
@@ -906,6 +980,7 @@ def main() -> int:
                         "syn_filter_proportion": float(args.syn_filter_proportion)
                         if args.syn_filter_proportion is not None
                         else None,
+                        "syn_filter_target": str(args.syn_filter_target),
                         "filtered_classes": sorted(list(filter_kept.keys())) if filter_kept else [],
                         "filter_kept": filter_kept,
                     },
@@ -1041,6 +1116,7 @@ def main() -> int:
         loss_after = float(best_loss) if use_best else float(lossF)
 
         out_path = os.path.join(out_dir, f"client_{cid:02d}.pt")
+        os.makedirs(_maybe_win_long_path(os.path.dirname(out_path)), exist_ok=True)
         torch.save(
             {
                 "meta": {
@@ -1063,6 +1139,7 @@ def main() -> int:
                     "syn_scale_by_ratio": int(args.syn_scale_by_ratio),
                     "syn_label_sampling": str(args.syn_label_sampling),
                     "syn_filter_proportion": float(args.syn_filter_proportion) if args.syn_filter_proportion is not None else None,
+                    "syn_filter_target": str(args.syn_filter_target),
                     "syn_filter_kept": {int(k): {kk: int(vv) for kk, vv in v.items()} for k, v in filter_kept.items()},
                     "acc_before": float(acc0),
                     "loss_before": float(loss0),
@@ -1073,7 +1150,7 @@ def main() -> int:
                 },
                 "state_dict": (best_state if use_best else m.state_dict()),
             },
-            out_path,
+            _maybe_win_long_path(out_path),
         )
 
         results.append(
@@ -1096,7 +1173,7 @@ def main() -> int:
     avg_after = float(np.mean([r["acc_after"] for r in results])) if results else 0.0
     logger.info(f"[stage4_cvae_pool] finished: avg_acc {avg_before:.4f} -> {avg_after:.4f} time={dt_all:.1f}s")
 
-    with open(os.path.join(out_dir, "results.json"), "w", encoding="utf-8") as f:
+    with open(_maybe_win_long_path(os.path.join(out_dir, "results.json")), "w", encoding="utf-8") as f:
         json.dump({"results": results, "avg_before": avg_before, "avg_after": avg_after}, f, ensure_ascii=False, indent=2)
 
     return 0
