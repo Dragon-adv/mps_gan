@@ -87,6 +87,19 @@ def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def categorize_client(log: ClientLog, eps: float = 1e-6) -> str:
+    """根据微调前后准确率划分客户端类别，缺失则视为 unchanged。"""
+    if log.acc_before is None or log.acc_after is None:
+        return "unchanged"
+
+    delta = log.acc_after - log.acc_before
+    if delta > eps:
+        return "improved"
+    if delta < -eps:
+        return "declined"
+    return "unchanged"
+
+
 def plot_client_curves(
     cid: int, log: ClientLog, output_dir: str, show_train: bool
 ) -> None:
@@ -252,8 +265,13 @@ def main() -> None:
     for cid, log in clients_logs.items():
         if cid not in selected:
             continue
+        category = categorize_client(log)
+        category_dir = os.path.join(args.output_dir, "clients", category)
         plot_client_curves(
-            cid, log, os.path.join(args.output_dir, "clients"), show_train=not args.no_train
+            cid,
+            log,
+            category_dir,
+            show_train=not args.no_train,
         )
 
     plot_aggregated_eval(clients_logs, os.path.join(args.output_dir, "aggregate"))
