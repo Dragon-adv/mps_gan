@@ -99,6 +99,42 @@ def _extract_syn_xy(syn_dataset: list[dict[str, Any]]) -> tuple[torch.Tensor, to
     return syn_z, syn_y
 
 
+@torch.no_grad()
+def _infer_seen_classes_from_indices(
+    dataset,
+    indices: list[int],
+    *,
+    device: str,
+    num_classes: int,
+    batch_size: int = 1024,
+) -> list[int]:
+    """
+    Infer which class labels appear in the given dataset indices.
+
+    This is used to optionally filter synthetic features per-client to only the
+    classes the client has seen locally (based on split user_groups).
+    """
+    if not indices:
+        return []
+
+    # Subset + loader to avoid loading all at once
+    dl = DataLoader(Subset(dataset, indices), batch_size=int(batch_size), shuffle=False, num_workers=0)
+    seen = torch.zeros(int(num_classes), dtype=torch.bool, device=device)
+    for batch in dl:
+        # dataset __getitem__ is expected to return (x, y) or (x, y, ...)
+        if not isinstance(batch, (list, tuple)) or len(batch) < 2:
+            raise ValueError("Unexpected dataset batch structure when inferring seen classes.")
+        y = batch[1]
+        if torch.is_tensor(y):
+            y = y.to(device).long().view(-1)
+        else:
+            y = torch.as_tensor(y, device=device).long().view(-1)
+        y = y[(y >= 0) & (y < int(num_classes))]
+        if y.numel() > 0:
+            seen[y.unique()] = True
+    return [int(i) for i in torch.nonzero(seen, as_tuple=False).view(-1).tolist()]
+
+
 def _forward_head_only(model: torch.nn.Module, x_high_raw: torch.Tensor, *, num_classes: int, clamp_nonneg: bool) -> torch.Tensor:
     """
     Head forward in raw-high space:
@@ -134,6 +170,15 @@ def main() -> int:
     p.add_argument("--log_interval", type=int, default=200)
     p.add_argument("--eval_interval", type=int, default=500)
     p.add_argument("--clamp_nonneg", type=int, default=1, help="Clamp synthetic raw-high to >=0 before normalize (default: 1)")
+    p.add_argument(
+        "--syn_class_mode",
+        type=str,
+        default="all",
+        choices=["all", "local_seen"],
+        help="Which classes' synthetic features to use for head finetune. "
+        "'all': use all classes (default, original behavior). "
+        "'local_seen': per-client, only use classes appearing in the client's local TRAIN split (user_groups[cid]).",
+    )
     args = p.parse_args()
 
     device = resolve_device(args.gpu)
@@ -217,6 +262,7 @@ def main() -> int:
             "weight_decay": float(args.weight_decay),
             "clamp_nonneg": int(args.clamp_nonneg),
             "seed": int(args.seed),
+            "syn_class_mode": str(args.syn_class_mode),
         },
     }
     meta_out["args"] = vars(args)
@@ -226,8 +272,8 @@ def main() -> int:
     results: list[dict[str, Any]] = []
     t_all = time.time()
 
-    # Build synthetic loader once (same for all clients); shuffle each epoch-like pass
-    syn_dl = DataLoader(
+    # Default synthetic loader (same for all clients); used when syn_class_mode='all'
+    syn_dl_all = DataLoader(
         TensorDataset(syn_z_all, syn_y_all),
         batch_size=int(args.batch_size),
         shuffle=True,
@@ -261,6 +307,36 @@ def main() -> int:
         # Client test loader (images)
         test_idxs = normalize_split_indices(user_groups_lt[int(cid)])
         dl_test = DataLoader(Subset(test_dataset, test_idxs), batch_size=int(args.batch_size), shuffle=False, num_workers=0)
+
+        # Optionally filter synthetic classes to only those seen by this client locally (train split)
+        seen_classes: list[int] | None = None
+        syn_dl = syn_dl_all
+        if str(args.syn_class_mode) == "local_seen":
+            train_idxs = normalize_split_indices(user_groups[int(cid)]) if user_groups is not None else []
+            seen_classes = _infer_seen_classes_from_indices(
+                train_dataset,
+                train_idxs,
+                device=device,
+                num_classes=num_classes,
+                batch_size=max(256, int(args.batch_size)),
+            )
+            if len(seen_classes) == 0:
+                print(f"[stage4_head_raw][cid={cid:02d}] syn_class_mode=local_seen but no seen classes found; fallback to all classes.")
+            else:
+                syn_dataset_local = [d for d in syn_dataset if int(d.get("class_index")) in set(seen_classes)]
+                if len(syn_dataset_local) == 0:
+                    print(
+                        f"[stage4_head_raw][cid={cid:02d}] syn_class_mode=local_seen produced empty syn subset; fallback to all classes. "
+                        f"seen_classes={seen_classes}"
+                    )
+                else:
+                    z_local, y_local = _extract_syn_xy(syn_dataset_local)
+                    syn_dl = DataLoader(
+                        TensorDataset(z_local.to(device), y_local.to(device)),
+                        batch_size=int(args.batch_size),
+                        shuffle=True,
+                        drop_last=True,
+                    )
 
         # Baseline eval (before finetune) for comparison only.
         # NOTE: We do NOT allow baseline to "seed" best; best is computed from finetune-eval only.
@@ -362,6 +438,8 @@ def main() -> int:
                 "loss_final": float(lossF),
                 "last_train_loss": float(last_loss) if last_loss is not None else None,
                 "sec_client": float(time.time() - t0),
+                "syn_class_mode": str(args.syn_class_mode),
+                "seen_classes": seen_classes,
             }
         )
 
