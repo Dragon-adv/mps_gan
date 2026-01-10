@@ -16,3 +16,5 @@ newresults/
 **/**.log
 
 analysis/teacher_on_synth/
+
+analysis/** */
