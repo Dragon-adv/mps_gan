@@ -129,61 +129,98 @@ class SameClassMixupFeatureDataset(Dataset):
         features: torch.Tensor,
         labels: torch.Tensor,
         *,
-        lam: float,
+        lam: Optional[float] = None,
+        lam_mode: Literal["fixed", "beta"] = "fixed",
+        beta_alpha: float = 0.4,
+        beta_beta: Optional[float] = None,
         p: float = 1.0,
         seed: Optional[int] = None,
     ):
         if features.shape[0] != labels.shape[0]:
             raise ValueError("features and labels must have same length.")
-        if not (0.0 <= float(lam) <= 1.0):
-            raise ValueError(f"mixup lam must be in [0,1], got {lam}")
+        lam_mode = str(lam_mode).lower().strip()
+        if lam_mode not in ("fixed", "beta"):
+            raise ValueError(f"mixup lam_mode must be one of ['fixed','beta'], got {lam_mode}")
+        if lam_mode == "fixed":
+            if lam is None:
+                raise ValueError("mixup lam must be provided when lam_mode='fixed'")
+            if not (0.0 <= float(lam) <= 1.0):
+                raise ValueError(f"mixup lam must be in [0,1], got {lam}")
+        else:
+            a = float(beta_alpha)
+            b = float(beta_beta) if beta_beta is not None else float(beta_alpha)
+            if not (a > 0.0 and b > 0.0):
+                raise ValueError(
+                    f"mixup beta_alpha/beta_beta must be > 0, got alpha={beta_alpha}, beta={beta_beta}"
+                )
         if not (0.0 <= float(p) <= 1.0):
             raise ValueError(f"mixup p must be in [0,1], got {p}")
 
         self.features = features
         self.labels = labels.long()
-        self.lam = float(lam)
+        self.lam_mode: Literal["fixed", "beta"] = lam_mode  # type: ignore[assignment]
+        self.lam = (float(lam) if lam is not None else None)
+        self.beta_alpha = float(beta_alpha)
+        self.beta_beta = (float(beta_beta) if beta_beta is not None else None)
         self.p = float(p)
 
         # 预先构建每个类别到索引列表的映射
-        self._class_to_indices: dict[int, torch.Tensor] = {}
+        self._class_to_indices: dict[int, np.ndarray] = {}
         for c in torch.unique(self.labels).tolist():
-            idxs = torch.nonzero(self.labels == int(c), as_tuple=False).view(-1)
-            self._class_to_indices[int(c)] = idxs
+            idxs = torch.nonzero(self.labels == int(c), as_tuple=False).view(-1).detach().cpu().numpy()
+            self._class_to_indices[int(c)] = idxs.astype(np.int64, copy=False)
 
-        self._rng = torch.Generator()
-        if seed is None:
-            self._rng.seed()
-        else:
-            self._rng.manual_seed(int(seed))
+        # numpy RNG：用于 beta/lambda 采样与配对采样，保证 seed 可复现（默认 DataLoader num_workers=0）
+        self._np_rng = np.random.default_rng(None if seed is None else int(seed))
 
     def __len__(self) -> int:
         return self.features.shape[0]
 
     def _sample_same_class_index(self, cls: int, avoid_idx: int) -> int:
         idxs = self._class_to_indices.get(int(cls))
-        if idxs is None or idxs.numel() <= 1:
+        if idxs is None or idxs.size <= 1:
             return int(avoid_idx)
 
-        pos = int(torch.randint(low=0, high=int(idxs.numel()), size=(1,), generator=self._rng).item())
-        j = int(idxs[pos].item())
+        pos = int(self._np_rng.integers(low=0, high=int(idxs.size)))
+        j = int(idxs[pos])
         if j == int(avoid_idx):
-            j = int(idxs[(pos + 1) % int(idxs.numel())].item())
+            j = int(idxs[(pos + 1) % int(idxs.size)])
         return j
+
+    def _sample_lam(self) -> float:
+        """
+        返回单个样本的 mixup lambda。
+        - fixed: 直接返回 self.lam
+        - beta:  从 Beta(alpha, beta) 采样
+        """
+        if self.lam_mode == "fixed":
+            # lam 在 __init__ 已校验非 None
+            return float(self.lam)  # type: ignore[arg-type]
+
+        a = float(self.beta_alpha)
+        b = float(self.beta_beta) if self.beta_beta is not None else float(self.beta_alpha)
+        lam = float(self._np_rng.beta(a, b))
+        # 数值安全夹紧
+        if lam < 0.0:
+            lam = 0.0
+        elif lam > 1.0:
+            lam = 1.0
+        return lam
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         x_i = self.features[idx]
         y = self.labels[idx]
 
         if self.p > 0.0:
-            do_mix = float(torch.rand((), generator=self._rng).item()) < self.p
+            do_mix = float(self._np_rng.random()) < self.p
         else:
             do_mix = False
 
-        if do_mix and self.lam not in (0.0, 1.0):
+        lam = self._sample_lam()
+        if do_mix and lam not in (0.0, 1.0):
             j = self._sample_same_class_index(int(y.item()), int(idx))
             x_j = self.features[j]
-            x = self.lam * x_i + (1.0 - self.lam) * x_j
+            x = lam * x_i + (1.0 - lam) * x_j
         else:
             x = x_i
 
@@ -198,10 +235,16 @@ def make_feature_loader(
     shuffle: bool = True,
     transform_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
     mixup_lam: Optional[float] = None,
+    mixup_lam_mode: Literal["fixed", "beta"] = "fixed",
+    mixup_beta_alpha: float = 0.4,
+    mixup_beta_beta: Optional[float] = None,
     mixup_p: float = 1.0,
     mixup_seed: Optional[int] = None,
 ) -> DataLoader:
-    if mixup_lam is None:
+    # 兼容旧行为：
+    # - fixed + mixup_lam is None => 不启用 mixup
+    # - beta  => 即使 mixup_lam is None，也启用 mixup（lambda 来自 Beta 分布）
+    if mixup_lam is None and str(mixup_lam_mode).lower().strip() == "fixed":
         ds: Dataset = TensorFeatureDataset(features, labels, transform_fn=transform_fn)
     else:
         if transform_fn is not None:
@@ -209,7 +252,10 @@ def make_feature_loader(
         ds = SameClassMixupFeatureDataset(
             features,
             labels,
-            lam=float(mixup_lam),
+            lam=(float(mixup_lam) if mixup_lam is not None else None),
+            lam_mode=str(mixup_lam_mode).lower().strip(),  # type: ignore[arg-type]
+            beta_alpha=float(mixup_beta_alpha),
+            beta_beta=(float(mixup_beta_beta) if mixup_beta_beta is not None else None),
             p=float(mixup_p),
             seed=mixup_seed,
         )
@@ -442,6 +488,9 @@ def build_loader_from_cache(
     shuffle: bool = True,
     transform_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
     mixup_lam: Optional[float] = None,
+    mixup_lam_mode: Literal["fixed", "beta"] = "fixed",
+    mixup_beta_alpha: float = 0.4,
+    mixup_beta_beta: Optional[float] = None,
     mixup_p: float = 1.0,
     mixup_seed: Optional[int] = None,
 ) -> Tuple[DataLoader, int, int]:
@@ -455,6 +504,9 @@ def build_loader_from_cache(
         shuffle=shuffle,
         transform_fn=transform_fn,
         mixup_lam=mixup_lam,
+        mixup_lam_mode=mixup_lam_mode,
+        mixup_beta_alpha=mixup_beta_alpha,
+        mixup_beta_beta=mixup_beta_beta,
         mixup_p=mixup_p,
         mixup_seed=mixup_seed,
     )
@@ -471,6 +523,9 @@ def build_loader_from_encoder(
     shuffle: bool = True,
     transform_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
     mixup_lam: Optional[float] = None,
+    mixup_lam_mode: Literal["fixed", "beta"] = "fixed",
+    mixup_beta_alpha: float = 0.4,
+    mixup_beta_beta: Optional[float] = None,
     mixup_p: float = 1.0,
     mixup_seed: Optional[int] = None,
 ) -> Tuple[DataLoader, int, int]:
@@ -484,6 +539,9 @@ def build_loader_from_encoder(
         shuffle=shuffle,
         transform_fn=transform_fn,
         mixup_lam=mixup_lam,
+        mixup_lam_mode=mixup_lam_mode,
+        mixup_beta_alpha=mixup_beta_alpha,
+        mixup_beta_beta=mixup_beta_beta,
         mixup_p=mixup_p,
         mixup_seed=mixup_seed,
     )

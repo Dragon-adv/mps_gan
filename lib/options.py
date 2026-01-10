@@ -81,6 +81,25 @@ def args_parser():
 
     parser.add_argument('--Dbeta', type=float, default=0.5, help="diri distribution parameter")
 
+    # ===================== Mixup (feature-level / same-class) =====================
+    # 说明：
+    # - fixed: 使用固定 lambda（--mixup_lam）
+    # - beta:  每个样本从 Beta(alpha, beta) 采样 lambda（若不传 beta，则 beta=alpha）
+    parser.add_argument('--mixup_enable', type=int, default=0,
+                        help="Enable same-class feature mixup (0/1). Default: 0")
+    parser.add_argument('--mixup_lam_mode', type=str, default='fixed', choices=['fixed', 'beta'],
+                        help="Mixup lambda mode: fixed or beta. Default: fixed")
+    parser.add_argument('--mixup_lam', type=float, default=0.7,
+                        help="Mixup lambda when mixup_lam_mode='fixed' (0..1). Default: 0.7")
+    parser.add_argument('--mixup_beta_alpha', type=float, default=0.4,
+                        help="Beta(alpha,beta) alpha when mixup_lam_mode='beta'. Default: 0.4")
+    parser.add_argument('--mixup_beta_beta', type=float, default=None,
+                        help="Beta(alpha,beta) beta when mixup_lam_mode='beta'. If None, beta=alpha.")
+    parser.add_argument('--mixup_p', type=float, default=1.0,
+                        help="Probability to apply mixup per sample (0..1). Default: 1.0")
+    parser.add_argument('--mixup_seed', type=int, default=None,
+                        help="Random seed for mixup sampling. Default: None")
+
     # for fedgkd
     parser.add_argument("--gkd_temperature", default=1, type=float)
     parser.add_argument("--distillation_coefficient", default=0.1, type=float)

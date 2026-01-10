@@ -17,4 +17,4 @@ newresults/
 
 analysis/teacher_on_synth/
 
-analysis/** */
+analysis/**/

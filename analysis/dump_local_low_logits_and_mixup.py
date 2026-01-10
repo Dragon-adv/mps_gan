@@ -177,39 +177,79 @@ def _mixup_and_forward_from_low(
     x_pool: torch.Tensor,
     y_pool: torch.Tensor,
     device: str,
-    lam: float,
+    lam_mode: str,
+    lam: Optional[float],
+    beta_alpha: float,
+    beta_beta: Optional[float],
     p: float,
     seed: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     """
     对全部样本做同类 mixup，并返回：
       - x_mix: (N,D) mixup 后 low
       - logits_mix: (N,C) 用 forward_from_low(x_mix)
       - pair_index: (N,)  被混入的同类样本索引（本地池内 index；无 mix 时为 -1）
       - mix_mask: (N,)    是否实际应用了 mixup
+      - lam_used: (N,)    实际使用的 lambda（无 mix 时为 1.0）
       - y: (N,)
     """
     class_to_indices = _build_class_to_indices(y_pool)
     rng = torch.Generator()
     rng.manual_seed(int(seed))
+    np_rng = np.random.default_rng(int(seed))
 
-    lam = float(lam)
+    lam_mode = str(lam_mode).lower().strip()
+    if lam_mode not in ("fixed", "beta"):
+        raise ValueError(f"lam_mode must be one of ['fixed','beta'], got {lam_mode}")
+    if lam_mode == "fixed":
+        if lam is None:
+            raise ValueError("lam must be provided when lam_mode='fixed'")
+        lam = float(lam)
+        if not (0.0 <= float(lam) <= 1.0):
+            raise ValueError(f"mixup lam must be in [0,1], got {lam}")
+    else:
+        a = float(beta_alpha)
+        b = float(beta_beta) if beta_beta is not None else float(beta_alpha)
+        if not (a > 0.0 and b > 0.0):
+            raise ValueError(f"beta_alpha/beta_beta must be > 0, got alpha={beta_alpha}, beta={beta_beta}")
+
     p = float(p)
     n = int(y_pool.numel())
     pair_index = torch.full((n,), -1, dtype=torch.long)
     mix_mask = torch.zeros((n,), dtype=torch.bool)
+    lam_used = torch.ones((n,), dtype=torch.float32)
 
     x_mix = x_pool.clone()
     for i_pool in range(n):
         cls = int(y_pool[i_pool].item())
-        do_mix = (p > 0.0) and (float(torch.rand((), generator=rng).item()) < p) and (lam not in (0.0, 1.0))
+        if lam_mode == "fixed":
+            lam_i = float(lam)  # type: ignore[arg-type]
+        else:
+            a = float(beta_alpha)
+            b = float(beta_beta) if beta_beta is not None else float(beta_alpha)
+            lam_i = float(np_rng.beta(a, b))
+            if lam_i < 0.0:
+                lam_i = 0.0
+            elif lam_i > 1.0:
+                lam_i = 1.0
+
+        do_mix = (p > 0.0) and (float(torch.rand((), generator=rng).item()) < p) and (lam_i not in (0.0, 1.0))
         j_pool = i_pool
         if do_mix:
             j_pool = _sample_same_class_index(class_to_indices=class_to_indices, cls=cls, avoid_idx=i_pool, rng=rng)
         if j_pool != i_pool:
-            x_mix[i_pool] = lam * x_pool[i_pool] + (1.0 - lam) * x_pool[j_pool]
+            x_mix[i_pool] = lam_i * x_pool[i_pool] + (1.0 - lam_i) * x_pool[j_pool]
             pair_index[i_pool] = int(j_pool)
             mix_mask[i_pool] = True
+            lam_used[i_pool] = float(lam_i)
 
     model.eval()
     # forward_from_low 分 batch，避免一次性塞太大
@@ -221,7 +261,7 @@ def _mixup_and_forward_from_low(
         logits_chunks.append(logits_b.detach().cpu().float())
     logits_mix = torch.cat(logits_chunks, dim=0)
 
-    return x_mix.cpu(), logits_mix, pair_index, mix_mask, y_pool.cpu(), x_pool.cpu()
+    return x_mix.cpu(), logits_mix, pair_index, mix_mask, lam_used.cpu(), y_pool.cpu(), x_pool.cpu()
 
 
 def main() -> int:
@@ -239,7 +279,21 @@ def main() -> int:
     p.add_argument("--out_dir", type=str, default=None, help="Output dir (default: analysis/local_mixup/<timestamp>)")
 
     p.add_argument("--batch_size", type=int, default=256)
-    p.add_argument("--mixup_lam", type=float, default=0.7)
+    p.add_argument("--mixup_lam", type=float, default=0.7, help="lam_mode=fixed 时使用的固定 lambda")
+    p.add_argument(
+        "--mixup_lam_mode",
+        type=str,
+        default="fixed",
+        choices=["fixed", "beta"],
+        help="mixup lambda 生成方式：fixed=固定 --mixup_lam；beta=每样本从 Beta 分布采样",
+    )
+    p.add_argument("--mixup_beta_alpha", type=float, default=0.4, help="lam_mode=beta 时 Beta(alpha,beta) 的 alpha")
+    p.add_argument(
+        "--mixup_beta_beta",
+        type=float,
+        default=None,
+        help="lam_mode=beta 时 Beta(alpha,beta) 的 beta；不传则 beta=alpha（对称 Beta）",
+    )
     p.add_argument("--mixup_p", type=float, default=1.0)
     args = p.parse_args()
 
@@ -328,12 +382,15 @@ def main() -> int:
         mean_abs = (logits_fwd - logits_low).abs().mean().item()
         pred_disagree = float((argmax_fwd != argmax_low).float().mean().item())
 
-        x_mix, logits_mix, pair_index, mix_mask, y_cpu, x_cpu = _mixup_and_forward_from_low(
+        x_mix, logits_mix, pair_index, mix_mask, lam_used, y_cpu, x_cpu = _mixup_and_forward_from_low(
             model=model,
             x_pool=x_pool,
             y_pool=y_pool,
             device=device,
-            lam=float(args.mixup_lam),
+            lam_mode=str(args.mixup_lam_mode),
+            lam=(float(args.mixup_lam) if args.mixup_lam is not None else None),
+            beta_alpha=float(args.mixup_beta_alpha),
+            beta_beta=(float(args.mixup_beta_beta) if args.mixup_beta_beta is not None else None),
             p=float(args.mixup_p),
             seed=int(args.seed) + 30000 + int(cid),
         )
@@ -356,9 +413,13 @@ def main() -> int:
                 "n_total": int(x_pool.shape[0]),
             },
             "mixup_cfg": {
+                "lam_mode": str(args.mixup_lam_mode),
                 "lam": float(args.mixup_lam),
+                "beta_alpha": float(args.mixup_beta_alpha),
+                "beta_beta": (float(args.mixup_beta_beta) if args.mixup_beta_beta is not None else None),
                 "p": float(args.mixup_p),
                 "n_mixed": int(mix_mask.long().sum().item()),
+                "lam_used": _summarize_array(lam_used.detach().cpu().numpy()),
             },
             "sanity": {
                 "forward_vs_forward_from_low": {
@@ -386,6 +447,7 @@ def main() -> int:
             "meta": meta,
             "pair_index_in_collect": pair_index,
             "mixup_mask": mix_mask,
+            "mixup_lam_used": lam_used,
             "y": y_cpu,
             "x_low": x_cpu,
             "x_mix": x_mix,

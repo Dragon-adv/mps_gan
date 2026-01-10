@@ -204,6 +204,25 @@ def main() -> int:
         help="mixup 系数 lambda：x' = lam*x_i + (1-lam)*x_j（同类）",
     )
     p.add_argument(
+        "--mixup_lam_mode",
+        type=str,
+        default="fixed",
+        choices=["fixed", "beta"],
+        help="mixup lambda 生成方式：fixed=固定 --mixup_lam；beta=每样本从 Beta 分布采样",
+    )
+    p.add_argument(
+        "--mixup_beta_alpha",
+        type=float,
+        default=0.4,
+        help="当 --mixup_lam_mode=beta 时，Beta(alpha, beta) 的 alpha（默认对称 Beta(alpha,alpha)）",
+    )
+    p.add_argument(
+        "--mixup_beta_beta",
+        type=float,
+        default=None,
+        help="当 --mixup_lam_mode=beta 时，Beta(alpha, beta) 的 beta；不传则使用 beta=alpha",
+    )
+    p.add_argument(
         "--mixup_p",
         type=float,
         default=1.0,
@@ -273,6 +292,9 @@ def main() -> int:
             batch_size=args.batch_size,
             shuffle=True,
             mixup_lam=(args.mixup_lam if args.mixup_enable else None),
+            mixup_lam_mode=str(args.mixup_lam_mode),
+            mixup_beta_alpha=float(args.mixup_beta_alpha),
+            mixup_beta_beta=(float(args.mixup_beta_beta) if args.mixup_beta_beta is not None else None),
             mixup_p=args.mixup_p,
             mixup_seed=args.mixup_seed,
         )
@@ -288,6 +310,9 @@ def main() -> int:
             batch_size=args.batch_size,
             shuffle=True,
             mixup_lam=(args.mixup_lam if args.mixup_enable else None),
+            mixup_lam_mode=str(args.mixup_lam_mode),
+            mixup_beta_alpha=float(args.mixup_beta_alpha),
+            mixup_beta_beta=(float(args.mixup_beta_beta) if args.mixup_beta_beta is not None else None),
             mixup_p=args.mixup_p,
             mixup_seed=args.mixup_seed,
         )
@@ -339,7 +364,10 @@ def main() -> int:
         "seed": args.seed,
         "mixup": {
             "enable": bool(args.mixup_enable),
+            "lam_mode": str(args.mixup_lam_mode),
             "lam": float(args.mixup_lam),
+            "beta_alpha": float(args.mixup_beta_alpha),
+            "beta_beta": (float(args.mixup_beta_beta) if args.mixup_beta_beta is not None else None),
             "p": float(args.mixup_p),
             "seed": (int(args.mixup_seed) if args.mixup_seed is not None else None),
             "note": "same-class feature mixup applied in feature_loader; cache file is unchanged",
