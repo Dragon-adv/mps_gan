@@ -114,6 +114,82 @@ class TensorFeatureDataset(Dataset):
         return x, self.labels[idx]
 
 
+class SameClassMixupFeatureDataset(Dataset):
+    """
+    同类特征 mixup（特征级线性插值）：
+      x' = lam * x_i + (1-lam) * x_j, where y_i == y_j
+
+    - label 保持为硬标签（仍返回 y_i）。
+    - 若某类样本数 < 2，则该类样本不会被 mix（退化为原样本）。
+    - 该 Dataset 需要 labels 做同类采样，因此无法通过 transform_fn 实现。
+    """
+
+    def __init__(
+        self,
+        features: torch.Tensor,
+        labels: torch.Tensor,
+        *,
+        lam: float,
+        p: float = 1.0,
+        seed: Optional[int] = None,
+    ):
+        if features.shape[0] != labels.shape[0]:
+            raise ValueError("features and labels must have same length.")
+        if not (0.0 <= float(lam) <= 1.0):
+            raise ValueError(f"mixup lam must be in [0,1], got {lam}")
+        if not (0.0 <= float(p) <= 1.0):
+            raise ValueError(f"mixup p must be in [0,1], got {p}")
+
+        self.features = features
+        self.labels = labels.long()
+        self.lam = float(lam)
+        self.p = float(p)
+
+        # 预先构建每个类别到索引列表的映射
+        self._class_to_indices: dict[int, torch.Tensor] = {}
+        for c in torch.unique(self.labels).tolist():
+            idxs = torch.nonzero(self.labels == int(c), as_tuple=False).view(-1)
+            self._class_to_indices[int(c)] = idxs
+
+        self._rng = torch.Generator()
+        if seed is None:
+            self._rng.seed()
+        else:
+            self._rng.manual_seed(int(seed))
+
+    def __len__(self) -> int:
+        return self.features.shape[0]
+
+    def _sample_same_class_index(self, cls: int, avoid_idx: int) -> int:
+        idxs = self._class_to_indices.get(int(cls))
+        if idxs is None or idxs.numel() <= 1:
+            return int(avoid_idx)
+
+        pos = int(torch.randint(low=0, high=int(idxs.numel()), size=(1,), generator=self._rng).item())
+        j = int(idxs[pos].item())
+        if j == int(avoid_idx):
+            j = int(idxs[(pos + 1) % int(idxs.numel())].item())
+        return j
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        x_i = self.features[idx]
+        y = self.labels[idx]
+
+        if self.p > 0.0:
+            do_mix = float(torch.rand((), generator=self._rng).item()) < self.p
+        else:
+            do_mix = False
+
+        if do_mix and self.lam not in (0.0, 1.0):
+            j = self._sample_same_class_index(int(y.item()), int(idx))
+            x_j = self.features[j]
+            x = self.lam * x_i + (1.0 - self.lam) * x_j
+        else:
+            x = x_i
+
+        return x, y
+
+
 def make_feature_loader(
     features: torch.Tensor,
     labels: torch.Tensor,
@@ -121,8 +197,22 @@ def make_feature_loader(
     batch_size: int = 256,
     shuffle: bool = True,
     transform_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    mixup_lam: Optional[float] = None,
+    mixup_p: float = 1.0,
+    mixup_seed: Optional[int] = None,
 ) -> DataLoader:
-    ds = TensorFeatureDataset(features, labels, transform_fn=transform_fn)
+    if mixup_lam is None:
+        ds: Dataset = TensorFeatureDataset(features, labels, transform_fn=transform_fn)
+    else:
+        if transform_fn is not None:
+            raise ValueError("transform_fn cannot be used together with same-class mixup.")
+        ds = SameClassMixupFeatureDataset(
+            features,
+            labels,
+            lam=float(mixup_lam),
+            p=float(mixup_p),
+            seed=mixup_seed,
+        )
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, drop_last=False)
 
 
@@ -351,12 +441,22 @@ def build_loader_from_cache(
     batch_size: int = 256,
     shuffle: bool = True,
     transform_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    mixup_lam: Optional[float] = None,
+    mixup_p: float = 1.0,
+    mixup_seed: Optional[int] = None,
 ) -> Tuple[DataLoader, int, int]:
     feats, labels = load_cached_features(cache_path)
     feature_dim = feats.shape[1]
     num_classes = int(labels.max().item() + 1)
     loader = make_feature_loader(
-        feats, labels, batch_size=batch_size, shuffle=shuffle, transform_fn=transform_fn
+        feats,
+        labels,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        transform_fn=transform_fn,
+        mixup_lam=mixup_lam,
+        mixup_p=mixup_p,
+        mixup_seed=mixup_seed,
     )
     return loader, feature_dim, num_classes
 
@@ -370,12 +470,22 @@ def build_loader_from_encoder(
     batch_size: int = 256,
     shuffle: bool = True,
     transform_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    mixup_lam: Optional[float] = None,
+    mixup_p: float = 1.0,
+    mixup_seed: Optional[int] = None,
 ) -> Tuple[DataLoader, int, int]:
     feats, labels = extract_low_features(model, dataloader, device, save_path=cache_path)
     feature_dim = feats.shape[1]
     num_classes = int(labels.max().item() + 1)
     loader = make_feature_loader(
-        feats, labels, batch_size=batch_size, shuffle=shuffle, transform_fn=transform_fn
+        feats,
+        labels,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        transform_fn=transform_fn,
+        mixup_lam=mixup_lam,
+        mixup_p=mixup_p,
+        mixup_seed=mixup_seed,
     )
     return loader, feature_dim, num_classes
 

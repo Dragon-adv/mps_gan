@@ -1,0 +1,56 @@
+{
+  "timestamp": "2026-01-10T15:15:55",
+  "script": "analysis/dump_local_low_logits_and_mixup.py",
+  "out_dir": "D:\\cursor_workspace\\FedMPS_GAN\\mps_gan\\analysis\\local_mixup\\20260110_151550\\client_00",
+  "stage1_ckpt_path": "D:\\cursor_workspace\\FedMPS_GAN\\newresults\\ours\\2026-01-01_20.43.57_cifar10_n3\\stage1_ckpts\\best-wo.pt",
+  "split_path": "D:\\cursor_workspace\\FedMPS_GAN\\newresults\\ours\\2026-01-01_20.43.57_cifar10_n3\\split.pkl",
+  "dataset": "cifar10",
+  "num_users": 20,
+  "num_classes": 10,
+  "client_id": 0,
+  "device": "cuda",
+  "gpu": 0,
+  "seed": 746456919,
+  "collect_cfg": {
+    "batch_size": 256,
+    "n_collect": 100,
+    "n_dump": 100,
+    "select_mode": "low_margin",
+    "per_class_k": 64
+  },
+  "mixup_cfg": {
+    "lam": 0.7,
+    "p": 1.0,
+    "n_mixed": 100
+  },
+  "sanity": {
+    "forward_vs_forward_from_low": {
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "pred_disagree_frac": 0.0
+    }
+  },
+  "quick": {
+    "pred_agree_frac": 1.0,
+    "conf_orig": {
+      "mean": 0.9930011034011841,
+      "median": 1.0,
+      "min": 0.6696798205375671,
+      "max": 1.0,
+      "p05": 0.9983337193727493,
+      "p25": 1.0,
+      "p75": 1.0,
+      "p95": 1.0
+    },
+    "conf_mix": {
+      "mean": 0.9999849200248718,
+      "median": 1.0,
+      "min": 0.9994814991950989,
+      "max": 1.0,
+      "p05": 0.9999704837799073,
+      "p25": 1.0,
+      "p75": 1.0,
+      "p95": 1.0
+    }
+  }
+}

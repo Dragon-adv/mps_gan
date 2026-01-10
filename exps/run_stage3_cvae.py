@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from typing import Tuple
 import json
 from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -105,6 +106,11 @@ def _make_run_tag(args) -> str:
     return f"seed{args.seed}_bs{args.batch_size}_ep{args.epochs}_lr{args.lr}"
 
 
+def _make_time_tag() -> str:
+    # 例如：20260110_143012（日期+时间）
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
 def _load_stage1_payload(path: str, map_location: str | torch.device):
     ckpt = load_checkpoint(path, map_location=map_location)
     if not isinstance(ckpt, dict):
@@ -185,6 +191,30 @@ def main() -> int:
     p.add_argument("--kl_anneal_steps", type=int, default=0, help=">0 时线性退火到 beta")
     p.add_argument("--recon_loss", type=str, default="l2", choices=["l1", "l2"])
     p.add_argument("--max_grad_norm", type=float, default=None, help="可选梯度裁剪")
+    # 特征增强（默认关闭，保持原行为）
+    p.add_argument(
+        "--mixup_enable",
+        action="store_true",
+        help="启用同类特征 mixup（在训练 cVAE 的 feature_loader 内进行；缓存文件不被修改）",
+    )
+    p.add_argument(
+        "--mixup_lam",
+        type=float,
+        default=0.7,
+        help="mixup 系数 lambda：x' = lam*x_i + (1-lam)*x_j（同类）",
+    )
+    p.add_argument(
+        "--mixup_p",
+        type=float,
+        default=1.0,
+        help="对每个样本执行 mixup 的概率（0~1）",
+    )
+    p.add_argument(
+        "--mixup_seed",
+        type=int,
+        default=None,
+        help="mixup 采样随机种子（不设则使用随机种子）",
+    )
     # 设备 / 其他
     p.add_argument("--gpu", type=int, default=0)
     p.add_argument("--seed", type=int, default=1234)
@@ -203,7 +233,9 @@ def main() -> int:
     # 0) 推断输出目录 / 缓存 / 保存路径
     log_dir = _infer_log_dir(args.stage1_ckpt_path)
     run_tag = _make_run_tag(args)
-    out_dir = args.out_dir or os.path.join(log_dir, "stage3", "cvae", run_tag)
+    # 默认用“日期+时间”命名，避免重复运行覆盖旧结果
+    time_tag = _make_time_tag()
+    out_dir = args.out_dir or os.path.join(log_dir, "stage3", "cvae", time_tag)
     save_path = args.save_path or os.path.join(out_dir, "generator.pt")
     cache_path = args.cache_path or os.path.join(out_dir, "cache", "low_feats.pt")
 
@@ -237,7 +269,12 @@ def main() -> int:
     if cache_path and os.path.exists(cache_path):
         print(f"[info] Loading cached features from {cache_path}")
         feature_loader, feat_dim, num_classes = build_loader_from_cache(
-            cache_path, batch_size=args.batch_size, shuffle=True
+            cache_path,
+            batch_size=args.batch_size,
+            shuffle=True,
+            mixup_lam=(args.mixup_lam if args.mixup_enable else None),
+            mixup_p=args.mixup_p,
+            mixup_seed=args.mixup_seed,
         )
     else:
         if cache_path:
@@ -250,6 +287,9 @@ def main() -> int:
             cache_path=cache_path,
             batch_size=args.batch_size,
             shuffle=True,
+            mixup_lam=(args.mixup_lam if args.mixup_enable else None),
+            mixup_p=args.mixup_p,
+            mixup_seed=args.mixup_seed,
         )
 
     # 3) 配置并训练 cVAE
@@ -289,12 +329,21 @@ def main() -> int:
     meta = {
         "stage": 3,
         "variant": "cvae",
+        "time_tag": time_tag,
+        "run_tag": run_tag,
         "dataset": args.dataset,
         "num_classes": num_classes,
         "feature_dim": feat_dim,
         "stage1_ckpt_path": args.stage1_ckpt_path,
         "cache_path": cache_path,
         "seed": args.seed,
+        "mixup": {
+            "enable": bool(args.mixup_enable),
+            "lam": float(args.mixup_lam),
+            "p": float(args.mixup_p),
+            "seed": (int(args.mixup_seed) if args.mixup_seed is not None else None),
+            "note": "same-class feature mixup applied in feature_loader; cache file is unchanged",
+        },
         "train": {
             "epochs": int(args.epochs),
             "batch_size": int(args.batch_size),
