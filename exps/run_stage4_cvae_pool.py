@@ -35,6 +35,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
+from torch.utils.tensorboard import SummaryWriter
 
 # Ensure project root is on sys.path when running as a script:
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -96,27 +97,9 @@ def _format_float_for_tag(x: float) -> str:
 
 
 def _make_run_tag(args: argparse.Namespace) -> str:
-    pf = "all"
-    if args.syn_filter_proportion is not None and float(args.syn_filter_proportion) > 0:
-        pf = _format_float_for_tag(args.syn_filter_proportion)
-    pft = str(args.syn_filter_target) if getattr(args, "syn_filter_target", None) else "local"
-    return (
-        f"cvae_pool"
-        f"_pr{_format_float_for_tag(args.pool_ratio)}"
-        f"_pmin{int(args.pool_min)}"
-        f"_pmax{int(args.pool_max)}"
-        f"_syn{_format_float_for_tag(args.syn_ratio)}"
-        f"_a{_format_float_for_tag(args.syn_alpha)}"
-        f"_r{int(args.syn_scale_by_ratio)}"
-        f"_pf{pf}"
-        f"_pft{pft}"
-        f"_{str(args.syn_label_sampling)}"
-        f"_steps{int(args.steps)}"
-        f"_bs{int(args.batch_size)}"
-        f"_lr{_format_float_for_tag(args.lr)}"
-        f"_wd{_format_float_for_tag(args.weight_decay)}"
-        f"_seed{int(args.seed)}"
-    )
+    # Use timestamp for directory name uniqueness instead of long parameter string
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"cvae_pool_{timestamp}"
 
 
 def _setup_logger(out_dir: str) -> logging.Logger:
@@ -516,6 +499,215 @@ def _compute_class_prototypes(
     return out
 
 
+@torch.no_grad()
+def _compute_class_moments(
+    model: nn.Module,
+    dataset,
+    idxs: List[int],
+    *,
+    num_classes: int,
+    n_per_class: int,
+    batch_size: int,
+    device: str,
+    seed: int,
+) -> Tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor], Dict[int, int]]:
+    """
+    计算 low_raw 的 per-class 均值/方差（逐维 diag），用于 moment matching。
+
+    returns:
+      - means: {c: (D,) on CPU}
+      - vars:  {c: (D,) on CPU}
+      - counts:{c: n_used}
+    """
+    targets = getattr(dataset, "targets", None)
+    if targets is None:
+        return {}, {}, {}
+    if torch.is_tensor(targets):
+        targets_t = targets.detach().cpu().long()
+    else:
+        targets_t = torch.tensor(list(targets), dtype=torch.long)
+
+    by_class: Dict[int, List[int]] = {int(c): [] for c in range(int(num_classes))}
+    for i in idxs:
+        y = int(targets_t[int(i)].item())
+        if 0 <= y < int(num_classes):
+            by_class[int(y)].append(int(i))
+
+    rng = np.random.default_rng(int(seed))
+    chosen: List[int] = []
+    for c in range(int(num_classes)):
+        pool = by_class[int(c)]
+        if not pool:
+            continue
+        k = min(int(n_per_class), len(pool))
+        sel = rng.choice(np.asarray(pool, dtype=np.int64), size=int(k), replace=False).tolist()
+        chosen.extend(int(x) for x in sel)
+
+    if not chosen:
+        return {}, {}, {}
+
+    loader = DataLoader(
+        Subset(dataset, chosen),
+        batch_size=int(batch_size),
+        shuffle=False,
+        num_workers=0,
+        drop_last=False,
+    )
+    sums: Dict[int, torch.Tensor] = {}
+    sumsq: Dict[int, torch.Tensor] = {}
+    counts: Dict[int, int] = {}
+    feature_dim: Optional[int] = None
+    model.eval()
+    with torch.no_grad():
+        for images, labels in loader:
+            images = images.to(device)
+            labels = labels.to(device).long()
+            _logits, _lp, _h, low_raw, _proj = model(images)
+            if feature_dim is None:
+                feature_dim = int(low_raw.shape[1])
+            for cls in torch.unique(labels).tolist():
+                cls = int(cls)
+                mask = labels == cls
+                if not mask.any():
+                    continue
+                feats = low_raw[mask].float()
+                if cls not in sums:
+                    sums[cls] = torch.zeros((int(feature_dim)), device=device, dtype=torch.float32)
+                    sumsq[cls] = torch.zeros((int(feature_dim)), device=device, dtype=torch.float32)
+                    counts[cls] = 0
+                sums[cls] += feats.sum(dim=0)
+                sumsq[cls] += (feats * feats).sum(dim=0)
+                counts[cls] += int(mask.sum().item())
+
+    means: Dict[int, torch.Tensor] = {}
+    vars_: Dict[int, torch.Tensor] = {}
+    for cls, s in sums.items():
+        n = int(counts.get(int(cls), 0))
+        if n <= 0:
+            continue
+        mu = (s / float(n)).detach().cpu()
+        ex2 = (sumsq[int(cls)] / float(n)).detach().cpu()
+        var = (ex2 - mu * mu).clamp_min(0.0)
+        means[int(cls)] = mu
+        vars_[int(cls)] = var
+    return means, vars_, {int(k): int(v) for k, v in counts.items()}
+
+
+def _compute_pool_moments(pools: Dict[int, torch.Tensor]) -> Tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor]]:
+    """
+    直接在 pool 上计算每类均值/方差（逐维 diag）。pools 在 CPU。
+    returns:
+      - mu_syn: {c: (D,) on CPU}
+      - var_syn:{c: (D,) on CPU}
+    """
+    mu_syn: Dict[int, torch.Tensor] = {}
+    var_syn: Dict[int, torch.Tensor] = {}
+    for cls, feats in pools.items():
+        if feats is None or feats.numel() == 0:
+            continue
+        x = feats.float()
+        mu = x.mean(dim=0)
+        ex2 = (x * x).mean(dim=0)
+        var = (ex2 - mu * mu).clamp_min(0.0)
+        mu_syn[int(cls)] = mu.detach().cpu()
+        var_syn[int(cls)] = var.detach().cpu()
+    return mu_syn, var_syn
+
+
+def _build_moment_match_tables(
+    *,
+    num_classes: int,
+    feature_dim: int,
+    mu_real: Dict[int, torch.Tensor],
+    var_real: Dict[int, torch.Tensor],
+    mu_syn: Dict[int, torch.Tensor],
+    var_syn: Dict[int, torch.Tensor],
+    eps: float,
+    device: str,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    构建用于批量 moment matching 的查表张量（device 上）：
+      - mu_s_table: (C,D)
+      - mu_r_table: (C,D)
+      - scale_table: (C,D) 其中 scale = sqrt((var_r+eps)/(var_s+eps))
+    缺失类默认 identity: mu=0, scale=1。
+    """
+    c = int(num_classes)
+    d = int(feature_dim)
+    mu_s = torch.zeros((c, d), dtype=torch.float32, device=device)
+    mu_r = torch.zeros((c, d), dtype=torch.float32, device=device)
+    scale = torch.ones((c, d), dtype=torch.float32, device=device)
+
+    e = float(eps)
+    for k, v in mu_syn.items():
+        kk = int(k)
+        if 0 <= kk < c:
+            mu_s[kk] = v.float().to(device)
+    for k, v in mu_real.items():
+        kk = int(k)
+        if 0 <= kk < c:
+            mu_r[kk] = v.float().to(device)
+    for k, v_s in var_syn.items():
+        kk = int(k)
+        if kk not in var_real:
+            continue
+        if 0 <= kk < c:
+            vv_s = v_s.float().to(device).clamp_min(0.0)
+            vv_r = var_real[kk].float().to(device).clamp_min(0.0)
+            scale[kk] = torch.sqrt((vv_r + e) / (vv_s + e))
+
+    return mu_s, mu_r, scale
+
+
+def _apply_moment_match(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    *,
+    mu_s_table: torch.Tensor,
+    mu_r_table: torch.Tensor,
+    scale_table: torch.Tensor,
+) -> torch.Tensor:
+    y = y.long()
+    return (x - mu_s_table[y]) * scale_table[y] + mu_r_table[y]
+
+
+def _shrink_moments(
+    mu_local: Dict[int, torch.Tensor],
+    var_local: Dict[int, torch.Tensor],
+    *,
+    mu_global: Dict[int, torch.Tensor],
+    var_global: Dict[int, torch.Tensor],
+    lam: float,
+) -> Tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor]]:
+    """
+    将本地 per-class moments 向全局 moments 做 shrinkage：
+      mu_t = (1-lam)*mu_local + lam*mu_global
+      var_t = (1-lam)*var_local + lam*var_global
+
+    仅对本地已有的类做 shrink；若某类缺失 global moments，则保持本地值不变。
+    """
+    l = float(lam)
+    if l <= 0.0:
+        return mu_local, var_local
+
+    mu_t: Dict[int, torch.Tensor] = {}
+    var_t: Dict[int, torch.Tensor] = {}
+    for cls, mu_l in mu_local.items():
+        c = int(cls)
+        mu_g = mu_global.get(c, None)
+        var_l = var_local.get(c, None)
+        var_g = var_global.get(c, None)
+        if var_l is None:
+            continue
+        if mu_g is None or var_g is None:
+            mu_t[c] = mu_l
+            var_t[c] = var_l
+        else:
+            mu_t[c] = (1.0 - l) * mu_l + l * mu_g
+            var_t[c] = (1.0 - l) * var_l + l * var_g
+    return mu_t, var_t
+
+
 def _filter_pools_by_prototypes(
     pools: Dict[int, torch.Tensor],
     prototypes: Dict[int, torch.Tensor],
@@ -618,6 +810,41 @@ def main() -> int:
         choices=["local", "global"],
         help="Prototype source for filtering synthetic pool when syn_filter_proportion>0. 'local' uses per-client real data; 'global' uses global prototypes computed once.",
     )
+    p.add_argument(
+        "--syn_moment_match",
+        type=int,
+        default=0,
+        choices=[0, 1],
+        help="Apply per-class moment matching to synthetic features before forward_from_low (Probe A).",
+    )
+    p.add_argument(
+        "--syn_moment_eps",
+        type=float,
+        default=1e-6,
+        help="Epsilon for moment matching scale: sqrt((var_real+eps)/(var_syn+eps)).",
+    )
+    p.add_argument(
+        "--syn_moment_n_real_per_class",
+        type=int,
+        default=200,
+        help="Max real samples per class (per client) to estimate low_raw moments for moment matching.",
+    )
+    p.add_argument(
+        "--syn_moment_shrink",
+        type=float,
+        default=0.0,
+        help=(
+            "Shrink per-class real moments towards global real moments (computed using the same client model "
+            "but over all clients' train indices). 0 disables (default). "
+            "Target moments: mu_t=(1-lam)*mu_local+lam*mu_global, var_t=(1-lam)*var_local+lam*var_global."
+        ),
+    )
+    p.add_argument(
+        "--syn_moment_n_global_per_class",
+        type=int,
+        default=200,
+        help="Max real samples per class (per client model) to estimate global moments for shrinkage.",
+    )
 
     # Pool building (auto)
     p.add_argument("--pool_ratio", type=float, default=1.0)
@@ -642,6 +869,8 @@ def main() -> int:
     if args.syn_filter_proportion is not None:
         if float(args.syn_filter_proportion) <= 0 or float(args.syn_filter_proportion) > 1:
             raise ValueError("--syn_filter_proportion must be in (0,1]; got {}".format(args.syn_filter_proportion))
+    if float(args.syn_moment_shrink) < 0.0 or float(args.syn_moment_shrink) > 1.0:
+        raise ValueError("--syn_moment_shrink must be in [0,1]; got {}".format(args.syn_moment_shrink))
 
     device = _resolve_device(args.gpu)
     _seed_all(int(args.seed))
@@ -682,6 +911,10 @@ def main() -> int:
     logger.info(f"[stage4_cvae_pool] run_tag={run_tag} auto_run_dir={int(args.auto_run_dir)} run_name={args.run_name}")
     logger.info(f"[stage4_cvae_pool] resolved_seed={args.seed}")
     logger.info(f"[stage4_cvae_pool] cli_args={vars(args)}")
+    tb_dir = os.path.join(out_dir, "tensorboard")
+    os.makedirs(_maybe_win_long_path(tb_dir), exist_ok=True)
+    writer = SummaryWriter(log_dir=_maybe_win_long_path(tb_dir))
+    logger.info(f"[stage4_cvae_pool] tensorboard_dir={tb_dir}")
 
     split = load_split(split_path)
     n_list = split["n_list"]
@@ -720,6 +953,9 @@ def main() -> int:
     if not isinstance(local_sd, dict):
         raise ValueError("Stage-1 checkpoint missing state['local_models_full_state_dicts']")
 
+    # Cache global train indices once (used by moment shrinkage; also useful elsewhere)
+    all_train_indices = _as_int_indices([user_groups[int(cid)] for cid in range(int(num_users))])
+
     # 可选：预先计算全局原型（一次）
     global_prototypes: Optional[Dict[int, torch.Tensor]] = None
     if (
@@ -727,7 +963,6 @@ def main() -> int:
         and float(args.syn_filter_proportion) > 0
         and str(args.syn_filter_target).lower() == "global"
     ):
-        all_train_indices = _as_int_indices([user_groups[int(cid)] for cid in range(int(num_users))])
         if len(all_train_indices) == 0:
             logger.info("[global_proto] no train indices found; skip global prototype computation.")
         else:
@@ -833,6 +1068,11 @@ def main() -> int:
                     "syn_label_sampling": str(args.syn_label_sampling),
                     "syn_filter_proportion": float(args.syn_filter_proportion) if args.syn_filter_proportion is not None else None,
                     "syn_filter_target": str(args.syn_filter_target),
+                    "syn_moment_match": int(args.syn_moment_match),
+                    "syn_moment_eps": float(args.syn_moment_eps),
+                    "syn_moment_n_real_per_class": int(args.syn_moment_n_real_per_class),
+                    "syn_moment_shrink": float(args.syn_moment_shrink),
+                    "syn_moment_n_global_per_class": int(args.syn_moment_n_global_per_class),
                     "seed": int(args.seed),
                 },
                 "cvae_cfg": {
@@ -932,6 +1172,59 @@ def main() -> int:
                 else:
                     logger.info(f"[filter_pool] cid={cid:02d} prototypes ok but no filtered pools produced, fallback.")
 
+        # Synthetic moment matching tables (per client; depends on client_pools & client model)
+        mm_tables = None
+        if int(args.syn_moment_match) == 1:
+            # (1) real moments from local real data (low_real from this client's frozen convs)
+            mu_real, var_real, cnt_real = _compute_class_moments(
+                m,
+                train_dataset,
+                train_idxs,
+                num_classes=int(num_classes),
+                n_per_class=int(args.syn_moment_n_real_per_class),
+                batch_size=int(args.batch_size),
+                device=device,
+                seed=int(args.seed) + 10000 + int(cid),
+            )
+            # Optional: shrink local moments towards "global" moments (same client model, all clients' train indices)
+            lam = float(args.syn_moment_shrink)
+            if lam > 0.0:
+                if len(all_train_indices) == 0:
+                    logger.info(f"[syn_mm][shrink] cid={cid:02d} all_train_indices empty; skip shrinkage.")
+                else:
+                    mu_g, var_g, cnt_g = _compute_class_moments(
+                        m,
+                        train_dataset,
+                        all_train_indices,
+                        num_classes=int(num_classes),
+                        n_per_class=int(args.syn_moment_n_global_per_class),
+                        batch_size=int(args.batch_size),
+                        device=device,
+                        seed=int(args.seed) + 20000 + int(cid),
+                    )
+                    mu_real, var_real = _shrink_moments(mu_real, var_real, mu_global=mu_g, var_global=var_g, lam=lam)
+            # (2) synthetic moments directly from (possibly filtered) pool
+            mu_syn, var_syn = _compute_pool_moments(client_pools)
+            if len(mu_real) == 0 or len(var_real) == 0 or len(mu_syn) == 0 or len(var_syn) == 0:
+                logger.info(f"[syn_mm] cid={cid:02d} insufficient moments; disable moment matching for this client.")
+            else:
+                feat_dim = int(cvae.cfg.feature_dim)
+                mu_s_table, mu_r_table, scale_table = _build_moment_match_tables(
+                    num_classes=int(num_classes),
+                    feature_dim=int(feat_dim),
+                    mu_real=mu_real,
+                    var_real=var_real,
+                    mu_syn=mu_syn,
+                    var_syn=var_syn,
+                    eps=float(args.syn_moment_eps),
+                    device=device,
+                )
+                mm_tables = {"mu_s_table": mu_s_table, "mu_r_table": mu_r_table, "scale_table": scale_table}
+                logger.info(
+                    f"[syn_mm] cid={cid:02d} enabled. classes_real={len(mu_real)} classes_pool={len(mu_syn)} "
+                    f"n_real_per_class={int(args.syn_moment_n_real_per_class)}"
+                )
+
         # Sanity: infer low dim from a real batch
         m.eval()
         images0, labels0 = next(iter(dl_train))
@@ -951,6 +1244,8 @@ def main() -> int:
         _assert_optimizer_params(opt, allowed=list(m.fc0.parameters()) + list(m.fc1.parameters()) + list(m.fc2.parameters()))
 
         acc0, loss0 = _eval_client_on_images(m, dl_test, device=device, num_classes=num_classes)
+        writer.add_scalar(f"client_{cid:02d}/eval/acc_before", float(acc0), 0)
+        writer.add_scalar(f"client_{cid:02d}/eval/loss_before", float(loss0), 0)
 
         m.train()
         step = 0
@@ -981,6 +1276,11 @@ def main() -> int:
                         if args.syn_filter_proportion is not None
                         else None,
                         "syn_filter_target": str(args.syn_filter_target),
+                        "syn_moment_match": int(args.syn_moment_match),
+                        "syn_moment_eps": float(args.syn_moment_eps),
+                        "syn_moment_n_real_per_class": int(args.syn_moment_n_real_per_class),
+                        "syn_moment_shrink": float(args.syn_moment_shrink),
+                        "syn_moment_n_global_per_class": int(args.syn_moment_n_global_per_class),
                         "filtered_classes": sorted(list(filter_kept.keys())) if filter_kept else [],
                         "filter_kept": filter_kept,
                     },
@@ -1034,6 +1334,14 @@ def main() -> int:
                         raise ValueError(f"Unsupported --syn_label_sampling: {args.syn_label_sampling}")
 
                     x_syn, sel_idx = _sample_from_pool(client_pools, y_syn, device=device, return_indices=True)
+                    if mm_tables is not None:
+                        x_syn = _apply_moment_match(
+                            x_syn,
+                            y_syn,
+                            mu_s_table=mm_tables["mu_s_table"],
+                            mu_r_table=mm_tables["mu_r_table"],
+                            scale_table=mm_tables["scale_table"],
+                        )
                     logits_syn, _lp_syn, _h_syn, _proj_syn = m.forward_from_low(x_syn)
                     logits_syn = logits_syn[:, 0:num_classes]
                     syn_ce = F.cross_entropy(logits_syn, y_syn, reduction="mean")
@@ -1068,6 +1376,11 @@ def main() -> int:
                         f"loss={last_loss:.6f} real_ce={float(real_ce.item()):.6f} syn_ce={float(syn_ce.item()):.6f} "
                         f"ratio={ratio:.3f} alpha={alpha:.4g} sec={dt:.1f}"
                     )
+                    global_step = step + 1
+                    writer.add_scalar(f"client_{cid:02d}/train/loss", float(last_loss), global_step)
+                    writer.add_scalar(f"client_{cid:02d}/train/real_ce", float(real_ce.item()), global_step)
+                    writer.add_scalar(f"client_{cid:02d}/train/syn_ce", float(syn_ce.item()), global_step)
+                    writer.add_scalar(f"client_{cid:02d}/train/syn_ratio", float(ratio), global_step)
 
                 if (step + 1) % int(args.eval_interval) == 0 or (step + 1) == int(args.steps):
                     acc1, loss1 = _eval_client_on_images(m, dl_test, device=device, num_classes=num_classes)
@@ -1077,7 +1390,13 @@ def main() -> int:
                         best_loss = float(loss1)
                         best_step = int(step + 1)
                         best_state = {k: v.detach().cpu().clone() for k, v in m.state_dict().items()}
+                        writer.add_scalar(f"client_{cid:02d}/eval/best_acc", float(best_acc), best_step)
+                        writer.add_scalar(f"client_{cid:02d}/eval/best_step", float(best_step), best_step)
                     m.train()
+                    eval_step = step + 1
+                    writer.add_scalar(f"client_{cid:02d}/eval/acc", float(acc1), eval_step)
+                    writer.add_scalar(f"client_{cid:02d}/eval/loss", float(loss1), eval_step)
+                    writer.flush()
 
                     # 在两次 eval 之间写一条汇总记录
                     rec = {
@@ -1140,6 +1459,9 @@ def main() -> int:
                     "syn_label_sampling": str(args.syn_label_sampling),
                     "syn_filter_proportion": float(args.syn_filter_proportion) if args.syn_filter_proportion is not None else None,
                     "syn_filter_target": str(args.syn_filter_target),
+                    "syn_moment_match": int(args.syn_moment_match),
+                    "syn_moment_eps": float(args.syn_moment_eps),
+                    "syn_moment_n_real_per_class": int(args.syn_moment_n_real_per_class),
                     "syn_filter_kept": {int(k): {kk: int(vv) for kk, vv in v.items()} for k, v in filter_kept.items()},
                     "acc_before": float(acc0),
                     "loss_before": float(loss0),
@@ -1167,6 +1489,17 @@ def main() -> int:
             f"[stage4_cvae_pool][cid={cid:02d}] done: acc {float(acc0):.4f} -> {float(acc_after):.4f} "
             f"(best_step={int(best_step)}) saved={out_path}"
         )
+        writer.add_scalar(
+            f"client_{cid:02d}/eval/acc_after",
+            float(acc_after),
+            int(best_step if use_best else args.steps),
+        )
+        writer.add_scalar(
+            f"client_{cid:02d}/eval/loss_after",
+            float(loss_after),
+            int(best_step if use_best else args.steps),
+        )
+        writer.flush()
 
     dt_all = time.time() - start_all
     avg_before = float(np.mean([r["acc_before"] for r in results])) if results else 0.0
@@ -1175,6 +1508,11 @@ def main() -> int:
 
     with open(_maybe_win_long_path(os.path.join(out_dir, "results.json")), "w", encoding="utf-8") as f:
         json.dump({"results": results, "avg_before": avg_before, "avg_after": avg_after}, f, ensure_ascii=False, indent=2)
+
+    writer.add_scalar("global/avg_acc_before", avg_before, 0)
+    writer.add_scalar("global/avg_acc_after", avg_after, int(args.steps))
+    writer.flush()
+    writer.close()
 
     return 0
 
